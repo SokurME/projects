@@ -1,0 +1,56 @@
+#Подключение мотора к Ардуино через драйвер L298N позволит менять направление вращения ротора.
+#Но для использования данного модуля потребуется установить соответствующие библиотеки для Ардуино.
+#В примере мы использовали схему подключения двигателя с помощью модуля L298N.
+#Соберите схему, как на картинке и загрузите следующий скетч с использованием.
+
+
+// задаем имена для портов
+#define IN1 4
+#define IN2 5
+#define IN3 6
+#define IN4 7
+
+void setup() {
+   pinMode(IN1, OUTPUT);
+   pinMode(IN2, OUTPUT);
+   pinMode(IN3, OUTPUT);
+   pinMode(IN4, OUTPUT);
+}
+
+void loop() {
+   // вращаем моторчики в одну сторону
+   digitalWrite(IN1, HIGH);
+   digitalWrite(IN2, LOW);
+   digitalWrite(IN3, HIGH);
+   digitalWrite(IN4, LOW);
+
+   delay(2000); // ждем 2 секунды
+
+   digitalWrite(IN1, LOW);
+   digitalWrite(IN2, LOW);
+   digitalWrite(IN3, LOW);
+   digitalWrite(IN4, LOW);
+
+   delay(1000); // выключаем на 1 секунду
+
+   // вращаем моторчики в обратную сторону
+   digitalWrite(IN1, LOW);
+   digitalWrite(IN2, HIGH);
+   digitalWrite(IN3, LOW);
+   digitalWrite(IN4, HIGH);
+
+   delay(2000); // ждем 2 секунды
+
+   digitalWrite(IN1, LOW);
+   digitalWrite(IN2, LOW);
+   digitalWrite(IN3, LOW);
+   digitalWrite(IN4, LOW);
+
+   delay(1000); // выключаем на 1 секунду
+}
+
+
+
+Пояснения к коду:
+1. драйвер двигателей позволяет управлять скоростью и направлением вращения мотора, подробнее читайте в обзоре — Подключение драйвера L298N к Arduino;
+2. если моторчики не крутятся, подключите к драйверу источник питания 6-12В.
