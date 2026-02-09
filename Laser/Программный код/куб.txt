@@ -9,9 +9,9 @@
 #define SERVO_H_PIN 6
 #define SERVO_V_PIN 5
 #define LED_PIN 13
-#define BUZZER_PIN 3  // Дополнительный пин для звукового сигнала
+#define BUZZER_PIN 3
 
-// Команды (должны совпадать с пультом)
+// Команды
 #define CMD_FULL_SHOW 1
 #define CMD_EMERGENCY_STOP 99
 
@@ -21,19 +21,12 @@ const byte address[6] = "00001";
 Servo ServoH;
 Servo ServoV;
 
-// Состояния куба
-enum CubeState {
-  CUBE_IDLE,
-  CUBE_SHOW_RUNNING,
-  CUBE_EMERGENCY_STOPPED
-};
-
-CubeState currentCubeState = CUBE_IDLE;
-bool emergencyFlag = false;
+// Глобальный флаг для экстренной остановки
+volatile bool emergencyStopFlag = false;
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("Cube Executor v2.0 with Safety");
+  Serial.println("Cube Executor v3.0 - Emergency Stop Fixed");
   
   pinMode(LASER_PIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -46,7 +39,6 @@ void setup() {
   ServoH.attach(SERVO_H_PIN);
   ServoV.attach(SERVO_V_PIN);
   
-  // Установка в безопасное положение
   ServoH.write(90);
   ServoV.write(90);
   delay(500);
@@ -62,11 +54,10 @@ void setup() {
   radio.openReadingPipe(1, address);
   radio.startListening();
   
-  Serial.println("Cube Combined System Ready...");
-  beep(2, 100); // Два коротких бипа при запуске
+  Serial.println("Cube Ready - Listening for commands");
+  beep(2, 100);
 }
 
-// Короткий звуковой сигнал
 void beep(int count, int duration) {
   for (int i = 0; i < count; i++) {
     tone(BUZZER_PIN, 1000, duration);
@@ -74,229 +65,225 @@ void beep(int count, int duration) {
   }
 }
 
-// Полный сброс системы
-void resetAllSystems() {
-  Serial.println("Resetting all systems...");
-  
-  // Выключаем лазер
-  digitalWrite(LASER_PIN, LOW);
-  
-  // Возвращаем серво в безопасное положение
-  ServoH.write(90);
-  ServoV.write(90);
-  
-  // Выключаем светодиод
-  digitalWrite(LED_PIN, LOW);
-  
-  // Выключаем звук
-  noTone(BUZZER_PIN);
-  
-  delay(100);
-}
-
-// ЭКСТРЕННАЯ ОСТАНОВКА
-void emergencyStop() {
-  Serial.println("!!! EMERGENCY STOP ACTIVATED !!!");
-  
-  emergencyFlag = true;
-  currentCubeState = CUBE_EMERGENCY_STOPPED;
-  
-  // Немедленно выключаем лазер
-  digitalWrite(LASER_PIN, LOW);
-  
-  // Быстро возвращаем серво в безопасное положение
-  ServoH.write(90);
-  ServoV.write(90);
-  
-  // Сигнал тревоги
-  for (int i = 0; i < 5; i++) {
-    digitalWrite(LED_PIN, HIGH);
-    tone(BUZZER_PIN, 800, 200);
-    delay(200);
-    digitalWrite(LED_PIN, LOW);
-    delay(200);
-  }
-  
-  // Длинный сигнал подтверждения
-  tone(BUZZER_PIN, 600, 1000);
-  delay(1000);
-  noTone(BUZZER_PIN);
-  
-  // Мигание LED 3 раза
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_PIN, HIGH);
-    delay(300);
-    digitalWrite(LED_PIN, LOW);
-    delay(300);
-  }
-  
-  Serial.println("System stopped. Manual reset required.");
-  emergencyFlag = false;
-}
-
-// Проверка флага экстренной остановки
-bool checkEmergency() {
-  if (emergencyFlag) {
-    emergencyStop();
+// Функция проверки экстренной остановки (вызывается часто!)
+bool checkEmergencyStop() {
+  if (emergencyStopFlag) {
+    performEmergencyStop();
     return true;
   }
   return false;
 }
 
-// Отправка статуса на пульт
-void sendStatus(int status) {
-  radio.stopListening();
-  delay(10);
-  radio.write(&status, sizeof(status));
-  radio.startListening();
-  Serial.print("Status sent: ");
-  Serial.println(status);
-}
-
-// Одиночное движение серво
-void moveSingleServo(Servo &servo, const char* servoName) {
-  Serial.print("Moving ");
-  Serial.println(servoName);
+// Выполнение экстренной остановки
+void performEmergencyStop() {
+  Serial.println("!!! PERFORMING EMERGENCY STOP !!!");
   
-  servo.write(50);
-  delay(800);
+  // 1. Немедленно выключаем лазер
+  digitalWrite(LASER_PIN, LOW);
   
-  if (checkEmergency()) return;
+  // 2. Возвращаем серво в безопасное положение
+  ServoH.write(90);
+  ServoV.write(90);
+  delay(100);
   
-  servo.write(130);
-  delay(800);
-  
-  if (checkEmergency()) return;
-  
-  servo.write(90);
-  delay(500);
-}
-
-// Функция долгого мигания
-void longBlink() {
-  Serial.println("Long blink activated");
-  
-  for (int i = 0; i < 10; i++) {
-    if (checkEmergency()) return;
-    
+  // 3. Звуковой и световой сигнал
+  for (int i = 0; i < 3; i++) {
     digitalWrite(LED_PIN, HIGH);
-    delay(500);
-    
-    if (checkEmergency()) return;
-    
+    tone(BUZZER_PIN, 800, 300);
+    delay(300);
     digitalWrite(LED_PIN, LOW);
-    delay(500);
+    delay(300);
+  }
+  
+  // 4. Длинный сигнал подтверждения
+  tone(BUZZER_PIN, 600, 1000);
+  delay(1000);
+  noTone(BUZZER_PIN);
+  
+  // 5. Отправляем подтверждение остановки на пульт
+  sendResponse(CMD_EMERGENCY_STOP);
+  
+  // 6. Сбрасываем флаг
+  emergencyStopFlag = false;
+  
+  Serial.println("Emergency stop complete");
+}
+
+// Отправка ответа на пульт
+void sendResponse(int response) {
+  radio.stopListening();
+  delay(5);
+  radio.write(&response, sizeof(response));
+  delay(5);
+  radio.startListening();
+  
+  Serial.print("Response sent: ");
+  Serial.println(response);
+}
+
+// Проверка входящих команд ВО ВРЕМЯ выполнения
+void checkRadioDuringShow() {
+  if (radio.available()) {
+    int cmd = 0;
+    radio.read(&cmd, sizeof(cmd));
+    
+    if (cmd == CMD_EMERGENCY_STOP) {
+      Serial.println("Emergency stop command received DURING show!");
+      emergencyStopFlag = true;
+    }
   }
 }
 
-// СТАДИЯ 2: Горизонтальное сканирование
+// СТАДИЯ с проверкой остановки
 void stageHorizontal() {
   Serial.println("Stage 2: Horizontal scan");
   digitalWrite(LASER_PIN, HIGH);
   
   for (int angle = 50; angle <= 130; angle += 10) {
-    if (checkEmergency()) return;
-    
     ServoH.write(angle);
+    
+    // ПРОВЕРЯЕМ ОСТАНОВКУ НА КАЖДОМ ШАГЕ
+    checkRadioDuringShow();
+    if (checkEmergencyStop()) return;
+    
     delay(250);
   }
   
   digitalWrite(LASER_PIN, LOW);
-  delay(3000);
+  delay(100);
+  
+  // Проверка перед отправкой ответа
+  if (checkEmergencyStop()) return;
+  
   ServoH.write(90);
-  sendStatus(2);
+  sendResponse(2);
 }
 
-// СТАДИЯ 3: Вертикальное сканирование
 void stageVertical() {
   Serial.println("Stage 3: Vertical scan");
   digitalWrite(LASER_PIN, HIGH);
   
   for (int angle = 50; angle <= 130; angle += 10) {
-    if (checkEmergency()) return;
-    
     ServoV.write(angle);
+    
+    // ПРОВЕРЯЕМ ОСТАНОВКУ НА КАЖДОМ ШАГЕ
+    checkRadioDuringShow();
+    if (checkEmergencyStop()) return;
+    
     delay(250);
   }
   
   digitalWrite(LASER_PIN, LOW);
-  delay(3000);
+  delay(100);
+  
+  if (checkEmergencyStop()) return;
+  
   ServoV.write(90);
-  sendStatus(3);
+  sendResponse(3);
 }
 
-// СТАДИЯ 4: Диагональное сканирование 1
 void stageDiagonal1() {
   Serial.println("Stage 4: Diagonal scan 1");
   digitalWrite(LASER_PIN, HIGH);
   
   for (int i = 50; i <= 130; i += 10) {
-    if (checkEmergency()) return;
-    
     ServoH.write(i);
     ServoV.write(i);
+    
+    // ПРОВЕРЯЕМ ОСТАНОВКУ НА КАЖДОМ ШАГЕ
+    checkRadioDuringShow();
+    if (checkEmergencyStop()) return;
+    
     delay(250);
   }
   
   digitalWrite(LASER_PIN, LOW);
-  delay(3000);
+  delay(100);
+  
+  if (checkEmergencyStop()) return;
+  
   ServoH.write(90);
   ServoV.write(90);
-  sendStatus(4);
+  sendResponse(4);
 }
 
-// СТАДИЯ 5: Диагональное сканирование 2 (финал)
 void stageDiagonal2() {
-  Serial.println("Stage 5: Diagonal scan 2 (Final)");
+  Serial.println("Stage 5: Diagonal scan 2");
   digitalWrite(LASER_PIN, HIGH);
   
   for (int i = 50; i <= 130; i += 10) {
-    if (checkEmergency()) return;
-    
     ServoH.write(i);
     ServoV.write(180 - i);
+    
+    // ПРОВЕРЯЕМ ОСТАНОВКУ НА КАЖДОМ ШАГЕ
+    checkRadioDuringShow();
+    if (checkEmergencyStop()) return;
+    
     delay(250);
   }
   
   digitalWrite(LASER_PIN, LOW);
-  delay(3000);
+  delay(100);
+  
+  if (checkEmergencyStop()) return;
+  
   ServoH.write(90);
   ServoV.write(90);
   
   // Финальный сигнал
   beep(3, 200);
   digitalWrite(LED_PIN, HIGH);
-  delay(1000);
+  delay(500);
   digitalWrite(LED_PIN, LOW);
   
-  sendStatus(5);
+  sendResponse(5);
 }
 
-// ПОЛНОЕ ШОУ
+// ПОЛНОЕ ШОУ с частой проверкой радио
 void runFullShow() {
-  if (currentCubeState == CUBE_SHOW_RUNNING) {
-    Serial.println("Show already running!");
-    return;
-  }
-  
-  currentCubeState = CUBE_SHOW_RUNNING;
   Serial.println("=== STARTING FULL SHOW ===");
   
-  // Запуск последовательности
+  // Убедимся, что флаг сброшен
+  emergencyStopFlag = false;
+  
+  // Стадия 2
   stageHorizontal();
-  if (checkEmergency()) return;
+  if (emergencyStopFlag) return;
   
+  // Проверяем радио между стадиями
+  checkRadioDuringShow();
+  if (checkEmergencyStop()) return;
+  
+  // Стадия 3
   stageVertical();
-  if (checkEmergency()) return;
+  if (emergencyStopFlag) return;
   
+  checkRadioDuringShow();
+  if (checkEmergencyStop()) return;
+  
+  // Стадия 4
   stageDiagonal1();
-  if (checkEmergency()) return;
+  if (emergencyStopFlag) return;
   
+  checkRadioDuringShow();
+  if (checkEmergencyStop()) return;
+  
+  // Стадия 5
   stageDiagonal2();
-  if (checkEmergency()) return;
   
   Serial.println("=== SHOW COMPLETE ===");
-  currentCubeState = CUBE_IDLE;
+}
+
+void moveSingleServo(Servo &servo, const char* name) {
+  Serial.print("Moving ");
+  Serial.println(name);
+  
+  servo.write(50);
+  delay(800);
+  servo.write(130);
+  delay(800);
+  servo.write(90);
+  delay(500);
 }
 
 void loop() {
@@ -306,15 +293,16 @@ void loop() {
     Serial.print("Command received: ");
     Serial.println(cmd);
     
-    // ПЕРВЫЙ ПРИОРИТЕТ: Команда экстренной остановки
+    // Немедленная обработка команды экстренной остановки
     if (cmd == CMD_EMERGENCY_STOP) {
-      emergencyFlag = true;
+      Serial.println("Emergency stop command received");
+      emergencyStopFlag = true;
       return;
     }
     
-    // Если система в аварийном режиме - игнорируем другие команды
-    if (currentCubeState == CUBE_EMERGENCY_STOPPED) {
-      Serial.println("System locked - Emergency stop active");
+    // Если уже в аварийном режиме - игнорируем другие команды
+    if (emergencyStopFlag) {
+      Serial.println("Ignoring command - emergency stop active");
       return;
     }
     
@@ -324,31 +312,40 @@ void loop() {
     } 
     else if (cmd == 2) {
       moveSingleServo(ServoH, "Servo Horizontal");
+      sendResponse(2);
     } 
     else if (cmd == 3) {
       moveSingleServo(ServoV, "Servo Vertical");
+      sendResponse(3);
     } 
     else if (cmd == 4) {
       digitalWrite(LASER_PIN, HIGH);
       delay(1000);
       digitalWrite(LASER_PIN, LOW);
-      sendStatus(4);
+      sendResponse(4);
     }
     else if (cmd == 5) {
-      longBlink();
-      sendStatus(5);
+      // Долгое мигание с проверкой остановки
+      for (int i = 0; i < 10; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(500);
+        digitalWrite(LED_PIN, LOW);
+        delay(500);
+        
+        checkRadioDuringShow();
+        if (emergencyStopFlag) {
+          performEmergencyStop();
+          return;
+        }
+      }
+      sendResponse(5);
     }
-    
-    // Возвращаемся в режим прослушивания
-    currentCubeState = CUBE_IDLE;
   }
   
-  // Индикация состояния
+  // Индикация работы
   static unsigned long lastBlink = 0;
-  if (currentCubeState == CUBE_IDLE && millis() - lastBlink > 2000) {
-    digitalWrite(LED_PIN, HIGH);
-    delay(50);
-    digitalWrite(LED_PIN, LOW);
+  if (millis() - lastBlink > 2000) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     lastBlink = millis();
   }
 }

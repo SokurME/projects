@@ -32,12 +32,11 @@ State currentState = STATE_MENU;
 int menuCounter = 1;   
 bool lastClk;
 bool btnSendPressed = false;
-bool encoderKeyPressed = false;
 unsigned long sendTime = 0;
-unsigned long keyHoldStart = 0;
-bool keyHolding = false;
-const unsigned long HOLD_TIME_FOR_STOP = 1000; // Удержание 1 сек для остановки
-const unsigned long RESPONSE_TIMEOUT = 15000; // 15 сек таймаут
+unsigned long keyPressStartTime = 0;
+bool keyIsPressed = false;
+const unsigned long HOLD_TIME_FOR_STOP = 1000; // Удержание 1 сек
+const unsigned long RESPONSE_TIMEOUT = 15000;
 
 // Меню
 const char* menuItems[] = {
@@ -54,7 +53,7 @@ void setup() {
   pinMode(ENCODER_KEY, INPUT_PULLUP);
   
   Serial.begin(9600);
-  Serial.println("Pult Remote v2.0 with Emergency Stop");
+  Serial.println("Pult Remote v3.0 with Emergency Stop");
   
   lcd.init();
   lcd.backlight();
@@ -77,7 +76,6 @@ void setup() {
   updateDisplay();
 }
 
-// Обновление дисплея в режиме меню
 void updateDisplay() {
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -87,7 +85,6 @@ void updateDisplay() {
   lcd.print(menuItems[menuCounter - 1]);
 }
 
-// Обновление дисплея во время шоу
 void updateShowDisplay(const char* line1, const char* line2) {
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -96,7 +93,6 @@ void updateShowDisplay(const char* line1, const char* line2) {
   lcd.print(line2);
 }
 
-// Отправка команды
 bool sendCommand(int cmd) {
   radio.stopListening();
   bool success = radio.write(&cmd, sizeof(cmd));
@@ -104,7 +100,23 @@ bool sendCommand(int cmd) {
   return success;
 }
 
-// Обработка энкодера
+void sendEmergencyStop() {
+  Serial.println("SENDING EMERGENCY STOP COMMAND...");
+  
+  // Отправляем команду 3 раза для надежности
+  for (int i = 0; i < 3; i++) {
+    radio.stopListening();
+    int cmd = CMD_EMERGENCY_STOP;
+    bool sent = radio.write(&cmd, sizeof(cmd));
+    Serial.print("Stop command attempt ");
+    Serial.print(i + 1);
+    Serial.print(": ");
+    Serial.println(sent ? "OK" : "FAILED");
+    delay(10);
+  }
+  radio.startListening();
+}
+
 void handleEncoder() {
   bool currentClk = digitalRead(ENCODER_S1);
   
@@ -123,7 +135,6 @@ void handleEncoder() {
   lastClk = currentClk;
 }
 
-// Обработка кнопок
 void handleButtons() {
   // Кнопка отправки (красная)
   bool sendBtnState = digitalRead(BTN_SEND) == LOW;
@@ -131,7 +142,6 @@ void handleButtons() {
     btnSendPressed = true;
     
     if (currentState == STATE_MENU) {
-      // Отправляем команду в зависимости от выбранного пункта меню
       int cmdToSend = menuCounter;
       
       if (cmdToSend == 1) { // Запуск полного шоу
@@ -140,18 +150,10 @@ void handleButtons() {
           sendTime = millis();
           updateShowDisplay("RUN 00001: SCAN", "STOP:Hold Key 1s");
           Serial.println("Full show started");
-        } else {
-          updateShowDisplay("SEND ERROR!", "Retry...");
-          delay(1000);
-          updateDisplay();
         }
       } else { // Отправка одиночной команды
         if (sendCommand(cmdToSend)) {
           updateShowDisplay("Command sent", menuItems[menuCounter - 1]);
-          delay(1000);
-          updateDisplay();
-        } else {
-          updateShowDisplay("SEND ERROR!", "Retry...");
           delay(1000);
           updateDisplay();
         }
@@ -163,115 +165,109 @@ void handleButtons() {
     btnSendPressed = false;
   }
   
-  // Кнопка энкодера (для экстренной остановки)
+  // Обработка кнопки энкодера для экстренной остановки
   bool encoderBtnState = digitalRead(ENCODER_KEY) == LOW;
   
-  if (encoderBtnState && !encoderKeyPressed) {
-    encoderKeyPressed = true;
-    keyHoldStart = millis();
-    keyHolding = true;
+  if (encoderBtnState && !keyIsPressed) {
+    // Кнопка только что нажата
+    keyIsPressed = true;
+    keyPressStartTime = millis();
+    Serial.println("Encoder key pressed (start counting)");
   }
   
-  if (!encoderBtnState && encoderKeyPressed) {
-    encoderKeyPressed = false;
-    keyHolding = false;
+  if (!encoderBtnState && keyIsPressed) {
+    // Кнопка отпущена
+    keyIsPressed = false;
+    unsigned long pressDuration = millis() - keyPressStartTime;
     
-    // Короткое нажатие в режиме меню
-    if (currentState == STATE_MENU && millis() - keyHoldStart < 300) {
-      // Можно добавить действие на короткое нажатие
-      updateShowDisplay("Short press", "in menu mode");
-      delay(500);
-      updateDisplay();
-    }
-  }
-  
-  // Проверка удержания кнопки энкодера
-  if (keyHolding && encoderKeyPressed) {
-    unsigned long holdDuration = millis() - keyHoldStart;
-    
-    if (holdDuration >= HOLD_TIME_FOR_STOP) {
-      // АКТИВАЦИЯ ЭКСТРЕННОЙ ОСТАНОВКИ
-      if (currentState == STATE_SHOW_RUNNING) {
-        if (sendCommand(CMD_EMERGENCY_STOP)) {
-          currentState = STATE_EMERGENCY_STOP;
-          updateShowDisplay("EMERGENCY STOP!", "Signal sent");
-          Serial.println("Emergency stop activated");
-          
-          // Сброс состояния через 2 секунды
-          delay(2000);
-          currentState = STATE_MENU;
-          updateDisplay();
-        } else {
-          updateShowDisplay("STOP FAILED!", "Radio error");
-          delay(2000);
-          updateShowDisplay("RUN 00001: SCAN", "STOP:Hold Key 1s");
-        }
-      }
-      keyHolding = false;
-    } else if (currentState == STATE_SHOW_RUNNING) {
-      // Показываем обратный отсчет до остановки
-      int countdown = (HOLD_TIME_FOR_STOP - holdDuration) / 100;
-      if (countdown < 10) {
-        char line2[17];
-        snprintf(line2, 17, "STOP:Hold %d..  ", countdown);
-        updateShowDisplay("RUN 00001: SCAN", line2);
-      }
-    }
-  }
-}
-
-// Обработка ответов от куба
-void handleResponses() {
-  if (currentState == STATE_SHOW_RUNNING) {
-    if (radio.available()) {
-      int response = 0;
-      radio.read(&response, sizeof(response));
-      sendTime = millis(); // Сброс таймера при получении ответа
+    if (pressDuration >= HOLD_TIME_FOR_STOP && currentState == STATE_SHOW_RUNNING) {
+      // Удержали достаточно долго - активируем остановку
+      currentState = STATE_EMERGENCY_STOP;
+      sendEmergencyStop();
       
-      Serial.print("Response received: ");
-      Serial.println(response);
+      updateShowDisplay("EMERGENCY STOP!", "Signal sent");
+      Serial.println("Emergency stop activated!");
       
-      switch(response) {
-        case 2:
-          updateShowDisplay("HORIZONTAL SCAN", "Angle: 40,0 deg");
-          break;
-        case 3:
-          updateShowDisplay("VERTICAL SCAN", "Angle: 0,40 deg");
-          break;
-        case 4:
-          updateShowDisplay("DIAGONAL SCAN 1", "Angle: 40,40 deg");
-          break;
-        case 5:
-          updateShowDisplay("SHOW COMPLETE!", "All stages done");
-          delay(2000);
-          currentState = STATE_MENU;
-          updateDisplay();
-          break;
-      }
-    }
-    
-    // Проверка таймаута
-    if (millis() - sendTime > RESPONSE_TIMEOUT) {
-      updateShowDisplay("TIMEOUT ERROR!", "No response");
-      Serial.println("Response timeout");
+      // Сброс через 2 секунды
       delay(2000);
       currentState = STATE_MENU;
       updateDisplay();
     }
   }
+  
+  // Отображение обратного отсчета во время удержания
+  if (keyIsPressed && currentState == STATE_SHOW_RUNNING) {
+    unsigned long holdTime = millis() - keyPressStartTime;
+    
+    if (holdTime < HOLD_TIME_FOR_STOP) {
+      int remaining = (HOLD_TIME_FOR_STOP - holdTime) / 100;
+      if (remaining <= 10) {
+        char line2[17];
+        snprintf(line2, 17, "STOP: %d sec...", remaining/10);
+        lcd.setCursor(0, 1);
+        lcd.print(line2);
+      }
+    } else if (holdTime >= HOLD_TIME_FOR_STOP) {
+      // Если удержали достаточно, но еще не отпустили
+      lcd.setCursor(0, 1);
+      lcd.print("RELEASE TO STOP!");
+    }
+  }
+}
+
+void handleResponses() {
+  if (currentState == STATE_SHOW_RUNNING && radio.available()) {
+    int response = 0;
+    radio.read(&response, sizeof(response));
+    sendTime = millis(); // Сброс таймера
+    
+    Serial.print("Response received: ");
+    Serial.println(response);
+    
+    if (response == CMD_EMERGENCY_STOP) {
+      // Если куб подтвердил остановку
+      updateShowDisplay("STOP CONFIRMED!", "Cube stopped");
+      currentState = STATE_MENU;
+      delay(2000);
+      updateDisplay();
+      return;
+    }
+    
+    switch(response) {
+      case 2:
+        updateShowDisplay("HORIZONTAL SCAN", "Angle: 40,0 deg");
+        break;
+      case 3:
+        updateShowDisplay("VERTICAL SCAN", "Angle: 0,40 deg");
+        break;
+      case 4:
+        updateShowDisplay("DIAGONAL SCAN 1", "Angle: 40,40 deg");
+        break;
+      case 5:
+        updateShowDisplay("SHOW COMPLETE!", "All stages done");
+        delay(2000);
+        currentState = STATE_MENU;
+        updateDisplay();
+        break;
+    }
+  }
+  
+  // Проверка таймаута
+  if (currentState == STATE_SHOW_RUNNING && millis() - sendTime > RESPONSE_TIMEOUT) {
+    updateShowDisplay("TIMEOUT ERROR!", "No response");
+    Serial.println("Response timeout");
+    delay(2000);
+    currentState = STATE_MENU;
+    updateDisplay();
+  }
 }
 
 void loop() {
-  // Всегда обрабатываем энкодер (меню меняется только в режиме меню)
   handleEncoder();
-  
-  // Всегда обрабатываем кнопки
   handleButtons();
-  
-  // Обработка ответов от куба (только во время шоу)
   handleResponses();
   
-  // Мигание LED на плате во время шоу
+  // Мигание LED во время шоу
   static unsigned long lastBlink = 0;
   if (currentState == STATE_SHOW_RUNNING && millis() - lastBlink > 500) {
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
