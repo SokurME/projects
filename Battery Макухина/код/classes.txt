@@ -1,0 +1,2 @@
+AA_battery
+CR_battery

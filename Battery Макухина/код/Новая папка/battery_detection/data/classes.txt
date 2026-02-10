@@ -1,0 +1,3 @@
+AA_battery
+CR_battery
+plastic_cap

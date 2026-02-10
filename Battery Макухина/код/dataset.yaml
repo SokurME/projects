@@ -1,0 +1,10 @@
+# Battery Detection Dataset
+path: .
+train: images
+val: images
+
+# Number of classes
+nc: 2
+
+# Class names
+names: ['AA_battery', 'CR_battery']
