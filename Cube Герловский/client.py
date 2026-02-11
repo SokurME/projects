@@ -1,61 +1,138 @@
 #!/usr/bin/env python3
-# esp_squares_monitor.py
+# cube_server_final.py
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-import requests
 import threading
 import time
 import json
-from datetime import datetime
-from collections import Counter
-import random  # Для эмуляции, если ESP не доступен
+from datetime import datetime, timedelta
+from collections import Counter, defaultdict
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import socket
+import sys
 
-class ESPSquaresMonitor:
+class CubeServer:
     def __init__(self, root):
         self.root = root
-        self.root.title("ESP Squares Monitor")
+        self.root.title("Cube Server Monitor")
         self.root.geometry("1200x800")
         
-        # Конфигурация
-        self.esp_ip = "192.168.137.176"  # IP вашего ESP
-        self.update_interval = 5  # секунд
-        self.total_squares = 10
-        self.is_monitoring = False
+        # Конфигурация сервера
+        self.server_port = 8000
+        self.total_cubes = 10  # Всего 10 кубов
+        self.server_running = False
+        self.http_server = None
+        self.server_thread = None
         
-        # Цветовая схема для значений 1-6
-        self.color_map = {
-            1: "#2ecc71",  # зеленый
-            2: "#e74c3c",  # красный
-            3: "#3498db",  # синий
-            4: "#f1c40f",  # желтый
-            5: "#e67e22",  # оранжевый
-            6: "#ecf0f1",  # белый
-            0: "#95a5a6"   # серый (по умолчанию/нет данных)
+        # Информация о гранях (цвета и статусы) - БЕЗ РЕБРО/УГОЛ
+        self.face_info = {
+            1: {"name": "ВЕРХНЯЯ", "color": "#2ecc71", "status": "Завершил", "ru_name": "Верхняя"},
+            2: {"name": "НИЖНЯЯ", "color": "#e74c3c", "status": "Не понимаю", "ru_name": "Нижняя"},
+            3: {"name": "ЛЕВАЯ", "color": "#90ee90", "status": "Готов", "ru_name": "Левая"},
+            4: {"name": "ПРАВАЯ", "color": "#f1c40f", "status": "Выполняю", "ru_name": "Правая"},
+            5: {"name": "ПЕРЕДНЯЯ", "color": "#FFFFFF", "status": "Устал", "ru_name": "Передняя"},  # Чисто белый
+            6: {"name": "ЗАДНЯЯ", "color": "#3498db", "status": "Вопрос", "ru_name": "Задняя"},
+            # 0: {"name": "РЕБРО/УГОЛ", "color": "#95a5a6", "status": "Ребро/Угол", "ru_name": "Ребро/Угол"} - УБРАНО
         }
         
-        # Состояние квадратов
-        self.squares_state = [0] * self.total_squares  # 0 = нет данных
+        # Состояние кубов
+        self.cubes_state = [0] * self.total_cubes  # 0 = нет данных/ребро/угол
+        self.cubes_last_update = [0] * self.total_cubes
+        self.cube_data = {i: {} for i in range(self.total_cubes)}
         
-        # Для первого ESP (реальный)
-        self.esp_state = 0  # Текущее значение с ESP
+        # Статистика - время в каждом статусе для каждого куба (только для статусов 1-6)
+        self.status_timers = {i: {} for i in range(self.total_cubes)}
+        self.status_start_time = {i: {} for i in range(self.total_cubes)}
+        self.total_time_in_status = {i: defaultdict(float) for i in range(self.total_cubes)}
         
-        # Статистика
-        self.history = {i: [] for i in range(self.total_squares)}
+        # История изменений (только статусы 1-6)
+        self.history = {i: [] for i in range(self.total_cubes)}
         self.total_counts = Counter()
+        
+        # Получаем IP адрес
+        self.computer_ip = self.get_local_ip()
         
         self.setup_ui()
         
+        # Запускаем обновление интерфейса
+        self.update_interval = 1000  # 1 секунда
+        self.root.after(self.update_interval, self.update_display)
+        
+        # Запускаем таймер для статистики времени
+        self.root.after(1000, self.update_status_timers)
+    
+    def get_local_ip(self):
+        """Получение локального IP адреса"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            try:
+                hostname = socket.gethostname()
+                ip = socket.gethostbyname(hostname)
+                return ip
+            except:
+                return "192.168.137.1"
+    
+    def update_status_timers(self):
+        """Обновление таймеров для каждого статуса (только 1-6)"""
+        current_time = time.time()
+        
+        for cube_id in range(self.total_cubes):
+            current_status = self.cubes_state[cube_id]
+            
+            # Обновляем только для статусов 1-6
+            if current_status in self.face_info:
+                # Обновляем время для предыдущего статуса
+                for status in list(self.status_timers[cube_id].keys()):
+                    if status != current_status and status in self.face_info:
+                        if self.status_start_time[cube_id].get(status):
+                            elapsed = current_time - self.status_start_time[cube_id][status]
+                            self.total_time_in_status[cube_id][status] += elapsed
+                            self.status_start_time[cube_id][status] = current_time
+                
+                # Начинаем отсчет для нового статуса
+                if current_status not in self.status_start_time[cube_id]:
+                    self.status_start_time[cube_id][current_status] = current_time
+                    self.total_time_in_status[cube_id][current_status] = 0.0
+                
+                # Обновляем текущее время для активного статуса
+                if current_status in self.status_start_time[cube_id]:
+                    elapsed = current_time - self.status_start_time[cube_id][current_status]
+                    self.status_timers[cube_id][current_status] = elapsed
+        
+        # Повторяем каждую секунду
+        self.root.after(1000, self.update_status_timers)
+    
+    def format_time(self, seconds):
+        """Форматирование времени в читаемый вид"""
+        if seconds < 60:
+            return f"{int(seconds)} сек"
+        elif seconds < 3600:
+            minutes = int(seconds / 60)
+            secs = int(seconds % 60)
+            return f"{minutes} мин {secs} сек"
+        else:
+            hours = int(seconds / 3600)
+            minutes = int((seconds % 3600) / 60)
+            secs = int(seconds % 60)
+            return f"{hours} ч {minutes} мин {secs} сек"
+    
     def setup_ui(self):
+        """Настройка графического интерфейса"""
         # Главный контейнер
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Верхняя панель - заголовок и управление
+        # Верхняя панель
         top_frame = ttk.Frame(main_frame)
         top_frame.pack(fill="x", pady=(0, 20))
         
-        title = ttk.Label(top_frame, text="📊 ESP Squares Monitor", 
+        title = ttk.Label(top_frame, text="🎲 Cube Server Monitor", 
                          font=("Arial", 24, "bold"))
         title.pack(side="left", padx=10)
         
@@ -63,511 +140,647 @@ class ESPSquaresMonitor:
         control_frame = ttk.Frame(top_frame)
         control_frame.pack(side="right", padx=10)
         
-        self.ip_var = tk.StringVar(value=self.esp_ip)
-        ip_entry = ttk.Entry(control_frame, textvariable=self.ip_var, width=15)
-        ip_entry.pack(side="left", padx=2)
+        # Информация о сервере
+        server_info = ttk.Label(control_frame, 
+                               text=f"IP: {self.computer_ip}:{self.server_port}",
+                               font=("Arial", 10))
+        server_info.pack(side="left", padx=5)
         
-        self.interval_var = tk.StringVar(value=str(self.update_interval))
-        interval_spin = ttk.Spinbox(control_frame, from_=1, to=60, 
-                                   textvariable=self.interval_var, width=5)
-        interval_spin.pack(side="left", padx=2)
-        ttk.Label(control_frame, text="сек").pack(side="left", padx=2)
-        
-        self.start_btn = ttk.Button(control_frame, text="▶️ Старт", 
-                                   command=self.toggle_monitoring)
+        self.start_btn = ttk.Button(control_frame, text="▶️ Запустить сервер", 
+                                   command=self.toggle_server)
         self.start_btn.pack(side="left", padx=2)
         
-        ttk.Button(control_frame, text="🔄 Обновить", 
-                  command=self.manual_update).pack(side="left", padx=2)
-        
         ttk.Button(control_frame, text="📊 Статистика", 
-                  command=self.show_stats).pack(side="left", padx=2)
+                  command=self.show_detailed_stats).pack(side="left", padx=2)
         
-        ttk.Button(control_frame, text="⚙️ Настройки", 
-                  command=self.show_settings).pack(side="left", padx=2)
+        # Основная область - кубы
+        cubes_frame = ttk.LabelFrame(main_frame, text="Статус кубов (10 устройств)")
+        cubes_frame.pack(fill="both", expand=True, pady=(0, 20))
         
-        # Основная область - квадраты
-        squares_frame = ttk.LabelFrame(main_frame, text="ESP Squares (10 устройств)")
-        squares_frame.pack(fill="both", expand=True, pady=(0, 20))
-        
-        # Сетка 2x5 для квадратов
-        grid_frame = ttk.Frame(squares_frame)
+        # Сетка 2x5 для кубов
+        grid_frame = ttk.Frame(cubes_frame)
         grid_frame.pack(expand=True, padx=20, pady=20)
         
-        self.square_canvases = []
-        self.square_labels = []
+        self.cube_canvases = []
+        self.status_labels = []
+        self.time_labels = []
+        self.conn_labels = []
         
-        for i in range(self.total_squares):
-            # Фрейм для каждого квадрата
-            square_frame = ttk.Frame(grid_frame, relief="ridge", borderwidth=2)
+        for i in range(self.total_cubes):
+            # Фрейм для каждого куба
+            cube_frame = ttk.Frame(grid_frame, relief="ridge", borderwidth=2)
             row = i // 5
             col = i % 5
-            square_frame.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+            cube_frame.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
             
-            # Заголовок квадрата
-            title = ttk.Label(square_frame, text=f"ESP #{i+1}", 
+            # Заголовок куба
+            title = ttk.Label(cube_frame, text=f"Куб #{i+1}", 
                              font=("Arial", 12, "bold"))
             title.pack(pady=(5, 0))
             
             # Canvas для цветного квадрата
-            canvas = tk.Canvas(square_frame, width=100, height=100, 
-                              bg=self.color_map[0], highlightthickness=0)
+            canvas = tk.Canvas(cube_frame, width=100, height=100, 
+                              bg="#95a5a6", highlightthickness=0)
             canvas.pack(pady=5)
             
-            # Рисуем квадрат
-            canvas.create_rectangle(10, 10, 90, 90, fill=self.color_map[0], 
-                                   outline="black", width=2)
+            # Рисуем квадрат с закругленными углами
+            square_id = canvas.create_rectangle(15, 15, 85, 85, 
+                                               fill="#95a5a6", 
+                                               outline="black", 
+                                               width=2,
+                                               tags="square")
             
-            # Метка с текущим значением
-            value_label = ttk.Label(square_frame, text="--", 
-                                   font=("Arial", 16, "bold"))
-            value_label.pack(pady=(0, 5))
+            # Метка со статусом
+            status_label = ttk.Label(cube_frame, text="Нет данных", 
+                                    font=("Arial", 10))
+            status_label.pack(pady=(0, 2))
             
-            # Статус подключения
-            status_label = ttk.Label(square_frame, text="❌ Нет данных", 
-                                    font=("Arial", 8), foreground="gray")
-            status_label.pack(pady=(0, 5))
+            # Метка со временем последнего обновления
+            time_label = ttk.Label(cube_frame, text="", 
+                                  font=("Arial", 8), foreground="gray")
+            time_label.pack(pady=(0, 2))
             
-            self.square_canvases.append({
+            # Метка с IP/статусом подключения
+            conn_label = ttk.Label(cube_frame, text="Не подключен", 
+                                  font=("Arial", 8), foreground="red")
+            conn_label.pack(pady=(0, 5))
+            
+            self.cube_canvases.append({
                 "canvas": canvas,
-                "square": canvas.find_all()[0],  # ID квадрата
-                "status": status_label
+                "square": square_id
             })
-            self.square_labels.append(value_label)
+            self.status_labels.append(status_label)
+            self.time_labels.append(time_label)
+            self.conn_labels.append(conn_label)
             
             # Делаем все колонки одинаковой ширины
             grid_frame.columnconfigure(col, weight=1)
         
-        # Нижняя панель - статистика по цветам
-        stats_frame = ttk.LabelFrame(main_frame, text="Статистика по цветам")
+        # Нижняя панель - улучшенная легенда статусов
+        legend_frame = ttk.LabelFrame(main_frame, text="Легенда статусов")
+        legend_frame.pack(fill="x", pady=(0, 10))
+        
+        # Контейнер для легенды с сеткой
+        legend_container = ttk.Frame(legend_frame)
+        legend_container.pack(pady=15, padx=15)
+        
+        # Создаем сетку 3x2 для красивого расположения
+        legend_items = [
+            (2, "#e74c3c", "Красный - Не понимаю"),
+            (5, "#FFFFFF", "Белый - Устал"),  # Белый с черной рамкой
+            (3, "#90ee90", "Салатовый - Готов"),
+            (1, "#2ecc71", "Зеленый - Завершил"),
+            (6, "#3498db", "Синий - Вопрос"),
+            (4, "#f1c40f", "Желтый - Выполняю")
+        ]
+        
+        # Создаем 2 строки по 3 элемента
+        for row in range(2):
+            row_frame = ttk.Frame(legend_container)
+            row_frame.pack(pady=8)
+            
+            for col in range(3):
+                idx = row * 3 + col
+                if idx < len(legend_items):
+                    face_num, color, text = legend_items[idx]
+                    
+                    item_frame = ttk.Frame(row_frame)
+                    item_frame.pack(side="left", padx=25, fill="x", expand=True)
+                    
+                    # Фрейм для квадрата
+                    color_frame = ttk.Frame(item_frame)
+                    color_frame.pack(side="left", padx=(0, 8))
+                    
+                    # Создаем красивый квадрат с тенью
+                    if face_num == 5:  # Белый цвет - с черной рамкой
+                        square_canvas = tk.Canvas(color_frame, width=28, height=28, 
+                                                 bg="white", highlightthickness=0)
+                        square_canvas.pack()
+                        # Черная рамка для белого квадрата
+                        square_canvas.create_rectangle(2, 2, 26, 26, 
+                                                      fill=color, 
+                                                      outline="black", 
+                                                      width=2)
+                    else:
+                        square_canvas = tk.Canvas(color_frame, width=28, height=28, 
+                                                 bg="white", highlightthickness=0)
+                        square_canvas.pack()
+                        # Квадрат с тенью
+                        square_canvas.create_rectangle(4, 4, 28, 28, 
+                                                      fill="#d0d0d0",  # Серая тень
+                                                      outline="")
+                        square_canvas.create_rectangle(2, 2, 26, 26, 
+                                                      fill=color, 
+                                                      outline="black", 
+                                                      width=1)
+                    
+                    # Текст легенды
+                    ttk.Label(item_frame, text=text, font=("Arial", 10)).pack(side="left")
+        
+        # Статистика активности
+        stats_frame = ttk.LabelFrame(main_frame, text="Активность сервера")
         stats_frame.pack(fill="x", pady=(0, 10))
         
-        # Фрейм для цветовых индикаторов
-        colors_frame = ttk.Frame(stats_frame)
-        colors_frame.pack(pady=10)
+        self.active_label = ttk.Label(stats_frame, 
+                                     text="Активных кубов: 0/10", 
+                                     font=("Arial", 10))
+        self.active_label.pack(side="left", padx=20)
         
-        self.color_stats_labels = {}
-        
-        for value, color in self.color_map.items():
-            if value == 0:
-                continue  # Пропускаем серый цвет
-                
-            color_frame = ttk.Frame(colors_frame)
-            color_frame.pack(side="left", padx=15)
-            
-            # Цветной квадратик
-            color_canvas = tk.Canvas(color_frame, width=30, height=30, 
-                                    bg=color, highlightthickness=1)
-            color_canvas.pack()
-            color_canvas.create_rectangle(2, 2, 28, 28, fill=color, 
-                                         outline="black")
-            
-            # Описание и счетчик
-            color_names = {
-                1: "Зеленый", 2: "Красный", 3: "Синий",
-                4: "Желтый", 5: "Оранжевый", 6: "Белый"
-            }
-            
-            ttk.Label(color_frame, text=color_names[value]).pack()
-            
-            count_label = ttk.Label(color_frame, text="0", 
-                                   font=("Arial", 14, "bold"))
-            count_label.pack()
-            
-            self.color_stats_labels[value] = count_label
-        
-        # Общая статистика
-        self.total_label = ttk.Label(stats_frame, 
-                                    text="Всего обновлений: 0", 
-                                    font=("Arial", 10))
-        self.total_label.pack(pady=5)
+        self.server_status_label = ttk.Label(stats_frame, 
+                                           text="Сервер: Остановлен", 
+                                           font=("Arial", 10), foreground="red")
+        self.server_status_label.pack(side="left", padx=20)
         
         # Статус бар
-        self.status_var = tk.StringVar(value="✅ Готов к работе")
+        self.status_var = tk.StringVar(value="🔄 Сервер не запущен")
         status_bar = ttk.Label(self.root, textvariable=self.status_var,
                               relief="sunken", anchor="w")
         status_bar.pack(side="bottom", fill="x")
+    
+    class RequestHandler(BaseHTTPRequestHandler):
+        def __init__(self, request, client_address, server):
+            self.server_obj = server.server_obj
+            super().__init__(request, client_address, server)
         
-        # Легенда
-        legend_frame = ttk.Frame(main_frame)
-        legend_frame.pack(fill="x", pady=(10, 0))
+        def do_GET(self):
+            if self.path == '/':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.end_headers()
+                
+                html = f"""<!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <title>Cube Server</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; text-align: center; margin: 20px; }}
+                        .status {{ font-size: 24px; margin: 20px; }}
+                        .info {{ margin: 10px; }}
+                        .ip {{ font-family: monospace; background: #f0f0f0; padding: 5px; }}
+                    </style>
+                </head>
+                <body>
+                    <h1>🎲 Cube Server</h1>
+                    <div class="status">Сервер работает ✅</div>
+                    <p class="info">Для подключения ESP укажите этот IP в коде:</p>
+                    <p class="ip">{self.server_obj.computer_ip}</p>
+                    <p class="info">ESP будет отправлять данные на: http://{self.server_obj.computer_ip}:8000/data</p>
+                </body>
+                </html>"""
+                
+                self.wfile.write(html.encode('utf-8'))
+                
+            elif self.path == '/data':
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                
+                response = {
+                    "status": "server_running",
+                    "server_ip": self.server_obj.computer_ip,
+                    "total_cubes": self.server_obj.total_cubes,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+                
+            else:
+                self.send_response(404)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b"404 Not Found")
         
-        ttk.Label(legend_frame, text="Легенда:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+        def do_POST(self):
+            if self.path == '/data':
+                try:
+                    content_length = int(self.headers['Content-Length'])
+                    post_data = self.rfile.read(content_length)
+                    
+                    data = json.loads(post_data.decode('utf-8'))
+                    cube_id = data.get('cube_id', 1)
+                    
+                    if 1 <= cube_id <= self.server_obj.total_cubes:
+                        idx = cube_id - 1
+                        
+                        # Получаем новый статус (только 1-6, остальное игнорируем)
+                        new_status = data.get('face_number', 0)
+                        if new_status not in self.server_obj.face_info:
+                            new_status = 0  # Игнорируем ребро/угол
+                        
+                        old_status = self.server_obj.cubes_state[idx]
+                        
+                        # Обновляем данные
+                        self.server_obj.cube_data[idx] = data
+                        self.server_obj.cubes_last_update[idx] = time.time()
+                        
+                        # Если статус изменился и это валидный статус (1-6)
+                        if old_status != new_status and new_status in self.server_obj.face_info:
+                            current_time = time.time()
+                            
+                            # Добавляем время старого статуса к общему (если это был валидный статус)
+                            if old_status in self.server_obj.face_info and old_status in self.server_obj.status_start_time[idx]:
+                                elapsed = current_time - self.server_obj.status_start_time[idx][old_status]
+                                self.server_obj.total_time_in_status[idx][old_status] += elapsed
+                            
+                            # Начинаем отсчет для нового статуса
+                            self.server_obj.status_start_time[idx][new_status] = current_time
+                            self.server_obj.cubes_state[idx] = new_status
+                            
+                            # Добавляем в историю (только валидные статусы)
+                            self.server_obj.history[idx].append({
+                                "time": datetime.now().strftime("%H:%M:%S"),
+                                "face": data.get('face', 'Неизвестно'),
+                                "face_number": new_status,
+                                "status": self.server_obj.face_info[new_status]["status"],
+                                "ip": data.get('ip', ''),
+                                "mac": data.get('mac', '')
+                            })
+                            self.server_obj.total_counts[new_status] += 1
+                        
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        
+                        response = {
+                            "status": "received",
+                            "cube_id": cube_id,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        
+                        self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+                    else:
+                        self.send_response(400)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        
+                        response = {"error": f"cube_id должен быть от 1 до {self.server_obj.total_cubes}"}
+                        self.wfile.write(json.dumps(response).encode('utf-8'))
+                        
+                except json.JSONDecodeError as e:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    
+                    response = {"error": f"Invalid JSON: {str(e)}"}
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                    
+                except Exception as e:
+                    self.send_response(500)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    
+                    response = {"error": f"Server error: {str(e)}"}
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                    
+            else:
+                self.send_response(404)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b"404 Not Found")
         
-        for value in range(1, 7):
-            color_names = ["Зеленый", "Красный", "Синий", "Желтый", "Оранжевый", "Белый"]
-            legend_item = ttk.Frame(legend_frame)
-            legend_item.pack(side="left", padx=5)
-            
-            tk.Canvas(legend_item, width=15, height=15, 
-                     bg=self.color_map[value]).pack(side="left")
-            ttk.Label(legend_item, text=f"={value} ({color_names[value-1]})").pack(side="left")
-        
-        # Для первого ESP (реальный) показываем его IP
-        esp_info = ttk.Label(main_frame, 
-                            text=f"ESP #1 подключается к: {self.esp_ip}",
-                            font=("Arial", 10, "italic"))
-        esp_info.pack(pady=5)
-        
-        # Эмуляция данных для остальных ESP
-        self.emulate_check = tk.BooleanVar(value=True)
-        emulate_checkbox = ttk.Checkbutton(main_frame, 
-                                          text="Эмулировать данные для ESP #2-10",
-                                          variable=self.emulate_check)
-        emulate_checkbox.pack()
-        
-    def get_esp_data(self):
-        """Получение данных с реального ESP"""
+        def log_message(self, format, *args):
+            pass
+    
+    def start_server(self):
         try:
-            response = requests.get(f"http://{self.esp_ip}/random", timeout=2)
-            if response.status_code == 200:
-                value = int(response.text.strip())
-                if 1 <= value <= 6:
-                    return value
-        except requests.exceptions.RequestException as e:
-            print(f"Ошибка подключения к ESP: {e}")
-        
-        return None  # Если не удалось получить данные
+            class CustomHTTPServer(HTTPServer):
+                def __init__(self, server_address, handler_class, server_obj):
+                    super().__init__(server_address, handler_class)
+                    self.server_obj = server_obj
+            
+            handler = lambda request, client_address, server: self.RequestHandler(
+                request, client_address, server
+            )
+            
+            self.http_server = CustomHTTPServer(('0.0.0.0', self.server_port), handler, self)
+            
+            print("=" * 50)
+            print(f"Сервер запущен!")
+            print(f"Доступ по адресу: http://{self.computer_ip}:{self.server_port}")
+            print("=" * 50)
+            
+            self.server_running = True
+            self.http_server.serve_forever()
+            
+        except OSError as e:
+            if e.errno == 98:
+                print(f"Ошибка: Порт {self.server_port} уже используется")
+                messagebox.showerror("Ошибка", f"Порт {self.server_port} уже используется.")
+            elif e.errno == 13:
+                print(f"Ошибка: Нет прав для запуска на порту {self.server_port}")
+                messagebox.showerror("Ошибка", f"Нет прав для запуска сервера на порту {self.server_port}.")
+            else:
+                print(f"Ошибка запуска сервера: {e}")
+                messagebox.showerror("Ошибка", f"Не удалось запустить сервер: {e}")
+            self.server_running = False
+            
+        except Exception as e:
+            print(f"Ошибка запуска сервера: {e}")
+            self.server_running = False
     
-    def emulate_esp_data(self, esp_num):
-        """Эмуляция данных для ESP (кроме первого)"""
-        if esp_num == 0:  # Первый ESP - реальный
-            return self.esp_state if self.esp_state != 0 else None
+    def stop_server(self):
+        if self.http_server:
+            self.http_server.shutdown()
+            self.http_server.server_close()
+            print("Сервер остановлен")
         
-        # Для остальных ESP эмулируем данные
-        if self.emulate_check.get():
-            # Эмуляция: иногда возвращаем случайное значение, иногда ошибку
-            if random.random() > 0.1:  # 90% успешных запросов
-                # С небольшим шансом меняем значение
-                if random.random() > 0.7:
-                    return random.randint(1, 6)
+        self.server_running = False
+    
+    def toggle_server(self):
+        if not self.server_running:
+            self.server_thread = threading.Thread(target=self.start_server, daemon=True)
+            self.server_thread.start()
+            
+            self.root.after(500, self.update_server_status)
+            self.start_btn.config(text="⏸️ Остановить сервер")
+            
+        else:
+            self.stop_server()
+            self.start_btn.config(text="▶️ Запустить сервер")
+            self.server_status_label.config(text="Сервер: Остановлен", foreground="red")
+            self.status_var.set("⏸️ Сервер остановлен")
+    
+    def update_server_status(self):
+        if self.server_running:
+            self.server_status_label.config(text="Сервер: Запущен", foreground="green")
+            self.status_var.set(f"✅ Сервер запущен на {self.computer_ip}:{self.server_port}")
+        else:
+            self.root.after(500, self.update_server_status)
+    
+    def update_display(self):
+        active_cubes = 0
+        
+        for i in range(self.total_cubes):
+            data = self.cube_data.get(i, {})
+            
+            if data:
+                face_num = data.get('face_number', 0)
+                last_update = self.cubes_last_update[i]
+                
+                if time.time() - last_update > 10:
+                    color = "#95a5a6"
+                    display_status = "Нет связи"
+                    conn_status = "Неактивен"
+                    self.cubes_state[i] = 0
                 else:
-                    # Сохраняем предыдущее значение или новое
-                    current = self.squares_state[esp_num]
-                    return current if current != 0 else random.randint(1, 6)
-        return None
-    
-    def update_square(self, esp_num, value):
-        """Обновление отображения квадрата"""
-        if value is None:
-            # Нет данных
-            color = self.color_map[0]
-            text = "--"
-            status = "❌ Нет данных"
-            self.squares_state[esp_num] = 0
-        else:
-            # Есть данные
-            color = self.color_map[value]
-            text = str(value)
-            status = "✅ Данные получены"
-            self.squares_state[esp_num] = value
+                    if face_num in self.face_info:
+                        color = self.face_info[face_num]["color"]
+                        display_status = self.face_info[face_num]["status"]
+                        self.cubes_state[i] = face_num
+                    else:
+                        color = "#95a5a6"
+                        display_status = "Нет данных"
+                        self.cubes_state[i] = 0
+                    
+                    conn_status = "Активен"
+                    active_cubes += 1
+                
+                time_diff = int(time.time() - last_update)
+                if time_diff < 60:
+                    time_str = f"{time_diff} сек назад"
+                else:
+                    time_str = datetime.fromtimestamp(last_update).strftime("%H:%M:%S")
+                
+                ip_info = data.get('ip', '')
+                if ip_info:
+                    conn_status = f"Активен ({ip_info})"
+                
+            else:
+                color = "#95a5a6"
+                display_status = "Нет данных"
+                conn_status = "Не подключен"
+                time_str = ""
+                self.cubes_state[i] = 0
             
-            # Сохраняем в историю
-            self.history[esp_num].append({
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "value": value
-            })
+            canvas_data = self.cube_canvases[i]
+            canvas_data["canvas"].itemconfig(canvas_data["square"], fill=color)
+            self.status_labels[i].config(text=display_status)
+            self.time_labels[i].config(text=time_str)
+            self.conn_labels[i].config(
+                text=conn_status,
+                foreground="green" if "Активен" in conn_status else "red"
+            )
         
-        # Обновляем Canvas
-        canvas_data = self.square_canvases[esp_num]
-        canvas_data["canvas"].itemconfig(canvas_data["square"], fill=color)
-        canvas_data["status"].config(text=status)
-        
-        # Обновляем метку
-        self.square_labels[esp_num].config(text=text)
+        self.active_label.config(text=f"Активных кубов: {active_cubes}/10")
+        self.root.after(self.update_interval, self.update_display)
     
-    def update_statistics(self):
-        """Обновление статистики"""
-        # Считаем количество каждого цвета
-        counts = Counter(self.squares_state)
-        
-        # Обновляем счетчики
-        for value in range(1, 7):
-            count = counts.get(value, 0)
-            self.color_stats_labels[value].config(text=str(count))
-        
-        # Общее количество обновлений
-        total_updates = sum(len(h) for h in self.history.values())
-        self.total_label.config(text=f"Всего обновлений: {total_updates}")
-        
-        # Обновляем общий счетчик
-        self.total_counts.update(self.squares_state)
-    
-    def update_all_squares(self):
-        """Обновление всех квадратов"""
-        # Обновляем реальный ESP
-        esp_value = self.get_esp_data()
-        self.esp_state = esp_value if esp_value else 0
-        self.update_square(0, esp_value)
-        
-        # Обновляем остальные ESP (эмулированные)
-        for i in range(1, self.total_squares):
-            value = self.emulate_esp_data(i)
-            self.update_square(i, value)
-        
-        # Обновляем статистику
-        self.update_statistics()
-        
-        # Обновляем статус
-        success_count = sum(1 for v in self.squares_state if v != 0)
-        self.status_var.set(f"✅ Обновлено: {success_count}/{self.total_squares} | Следующее обновление через {self.update_interval} сек")
-    
-    def manual_update(self):
-        """Ручное обновление"""
-        if not self.is_monitoring:
-            self.update_all_squares()
-    
-    def monitoring_loop(self):
-        """Цикл мониторинга"""
-        while self.is_monitoring:
-            try:
-                self.update_all_squares()
-            except Exception as e:
-                self.status_var.set(f"❌ Ошибка: {str(e)[:50]}")
-            
-            # Ждем указанный интервал
-            for i in range(self.update_interval * 10):  # Проверяем каждые 0.1 сек
-                if not self.is_monitoring:
-                    return
-                time.sleep(0.1)
-    
-    def toggle_monitoring(self):
-        """Включение/выключение мониторинга"""
-        if not self.is_monitoring:
-            # Начинаем мониторинг
-            self.is_monitoring = True
-            self.start_btn.config(text="⏸️ Стоп")
-            
-            # Обновляем конфигурацию
-            try:
-                self.esp_ip = self.ip_var.get()
-                self.update_interval = int(self.interval_var.get())
-            except:
-                messagebox.showerror("Ошибка", "Некорректные настройки")
-                self.is_monitoring = False
-                self.start_btn.config(text="▶️ Старт")
-                return
-            
-            # Запускаем поток мониторинга
-            self.monitor_thread = threading.Thread(target=self.monitoring_loop, daemon=True)
-            self.monitor_thread.start()
-            
-            self.status_var.set("🚀 Мониторинг запущен")
-        else:
-            # Останавливаем мониторинг
-            self.is_monitoring = False
-            self.start_btn.config(text="▶️ Старт")
-            self.status_var.set("⏸️ Мониторинг остановлен")
-    
-    def show_stats(self):
-        """Показать подробную статистику"""
-        # Создаем новое окно
+    def show_detailed_stats(self):
+        """Показать детальную статистику по времени (без ребро/угол)"""
         stats_window = tk.Toplevel(self.root)
-        stats_window.title("Подробная статистика")
-        stats_window.geometry("800x600")
+        stats_window.title("Детальная статистика по времени")
+        stats_window.geometry("900x700")
         
-        # Создаем Notebook для вкладок
         notebook = ttk.Notebook(stats_window)
         notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Вкладка 1: Общая статистика
-        general_frame = ttk.Frame(notebook)
-        notebook.add(general_frame, text="📊 Общая статистика")
+        # Вкладка 1: Сводная статистика
+        summary_frame = ttk.Frame(notebook)
+        notebook.add(summary_frame, text="📊 Сводная статистика")
         
-        # Текстовое поле для статистики
-        stats_text = tk.Text(general_frame, wrap="word", font=("Consolas", 10))
-        scrollbar = ttk.Scrollbar(general_frame, orient="vertical", command=stats_text.yview)
-        stats_text.configure(yscrollcommand=scrollbar.set)
+        summary_text = tk.Text(summary_frame, wrap="word", font=("Consolas", 10))
+        summary_scrollbar = ttk.Scrollbar(summary_frame, orient="vertical", command=summary_text.yview)
+        summary_text.configure(yscrollcommand=summary_scrollbar.set)
         
-        scrollbar.pack(side="right", fill="y")
-        stats_text.pack(side="left", fill="both", expand=True)
+        summary_scrollbar.pack(side="right", fill="y")
+        summary_text.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         
-        # Генерируем статистику
-        stats_lines = []
-        stats_lines.append("=" * 60)
-        stats_lines.append("ОБЩАЯ СТАТИСТИКА ESP КВАДРАТОВ")
-        stats_lines.append("=" * 60)
-        stats_lines.append("")
+        # Генерируем сводную статистику (только статусы 1-6)
+        summary_lines = []
+        summary_lines.append("=" * 70)
+        summary_lines.append("СВОДНАЯ СТАТИСТИКА ПО ВРЕМЕНИ")
+        summary_lines.append("=" * 70)
+        summary_lines.append("")
         
-        # Текущее состояние
-        stats_lines.append("Текущее состояние квадратов:")
-        for i in range(self.total_squares):
-            value = self.squares_state[i]
-            color_name = {
-                0: "Серый (нет данных)", 1: "Зеленый", 2: "Красный",
-                3: "Синий", 4: "Желтый", 5: "Оранжевый", 6: "Белый"
-            }.get(value, "Неизвестно")
+        # Активные кубы
+        active_cubes = sum(1 for i in range(self.total_cubes) 
+                          if self.cube_data.get(i) and 
+                          time.time() - self.cubes_last_update[i] <= 10)
+        
+        summary_lines.append(f"Активных кубов: {active_cubes}/{self.total_cubes}")
+        summary_lines.append("")
+        
+        # Общее время по статусам (только 1-6)
+        summary_lines.append("ОБЩЕЕ ВРЕМЯ ПО СТАТУСАМ:")
+        
+        total_times = defaultdict(float)
+        for cube_id in range(self.total_cubes):
+            for status, t in self.total_time_in_status[cube_id].items():
+                if status in self.face_info:  # Только статусы 1-6
+                    total_times[status] += t
+        
+        # Добавляем текущее время для активных статусов
+        current_time = time.time()
+        for cube_id in range(self.total_cubes):
+            current_status = self.cubes_state[cube_id]
+            if current_status in self.face_info and current_status in self.status_start_time[cube_id]:
+                elapsed = current_time - self.status_start_time[cube_id][current_status]
+                total_times[current_status] += elapsed
+        
+        # Сортируем по убыванию времени
+        sorted_times = []
+        for status, total_time in total_times.items():
+            if status in self.face_info and total_time > 0:
+                sorted_times.append((status, total_time))
+        
+        sorted_times.sort(key=lambda x: x[1], reverse=True)
+        
+        if sorted_times:
+            total_all_time = sum(t for _, t in sorted_times)
+            for status, total_time in sorted_times:
+                status_name = self.face_info[status]["status"]
+                percentage = (total_time / total_all_time * 100) if total_all_time > 0 else 0
+                summary_lines.append(f"  {status_name}: {self.format_time(total_time)} ({percentage:.1f}%)")
+        else:
+            summary_lines.append("  Нет данных о времени в статусах")
+        
+        summary_lines.append("")
+        
+        # Частота статусов
+        if self.total_counts:
+            summary_lines.append("ЧАСТОТА ИЗМЕНЕНИЙ СТАТУСОВ:")
+            valid_counts = [(s, c) for s, c in self.total_counts.items() if s in self.face_info]
+            if valid_counts:
+                for status, count in sorted(valid_counts, key=lambda x: x[1], reverse=True)[:5]:
+                    status_name = self.face_info[status]["status"]
+                    summary_lines.append(f"  {status_name}: {count} раз")
+        
+        summary_text.insert("1.0", "\n".join(summary_lines))
+        summary_text.config(state="disabled")
+        
+        # Вкладки для каждого куба (только активные кубы)
+        active_cube_ids = [i for i in range(self.total_cubes) 
+                          if self.cube_data.get(i) and 
+                          time.time() - self.cubes_last_update[i] <= 10]
+        
+        for cube_id in active_cube_ids:
+            cube_frame = ttk.Frame(notebook)
+            notebook.add(cube_frame, text=f"Куб {cube_id+1}")
             
-            stats_lines.append(f"  ESP #{i+1}: значение={value} ({color_name})")
-        
-        stats_lines.append("")
-        
-        # Общее распределение цветов
-        stats_lines.append("Распределение цветов:")
-        total_non_zero = sum(1 for v in self.squares_state if v != 0)
-        stats_lines.append(f"  Активных квадратов: {total_non_zero}/{self.total_squares}")
-        
-        for value in range(1, 7):
-            count = sum(1 for v in self.squares_state if v == value)
-            if count > 0:
-                color_name = ["Зеленый", "Красный", "Синий", "Желтый", "Оранжевый", "Белый"][value-1]
-                percentage = (count / total_non_zero * 100) if total_non_zero > 0 else 0
-                stats_lines.append(f"  {color_name}: {count} ({percentage:.1f}%)")
-        
-        stats_lines.append("")
-        
-        # История изменений
-        stats_lines.append("История изменений (последние 20):")
-        all_events = []
-        for i in range(self.total_squares):
-            for event in self.history[i][-5:]:  # Последние 5 событий каждого ESP
-                all_events.append((event["time"], i, event["value"]))
-        
-        # Сортируем по времени
-        all_events.sort(key=lambda x: x[0], reverse=True)
-        
-        for time_str, esp_num, value in all_events[:20]:
-            color_name = ["Зеленый", "Красный", "Синий", "Желтый", "Оранжевый", "Белый"][value-1]
-            stats_lines.append(f"  [{time_str}] ESP #{esp_num+1} → {value} ({color_name})")
-        
-        # Вставляем текст
-        stats_text.insert("1.0", "\n".join(stats_lines))
-        stats_text.config(state="disabled")
-        
-        # Вкладка 2: График истории (простой текстовый)
-        history_frame = ttk.Frame(notebook)
-        notebook.add(history_frame, text="📈 История значений")
-        
-        # Создаем Canvas для простого графика
-        canvas = tk.Canvas(history_frame, bg="white")
-        canvas.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        # Рисуем простой график для первого ESP
-        if self.history[0]:
-            values = [entry["value"] for entry in self.history[0]]
-            times = list(range(len(values)))
+            cube_text = tk.Text(cube_frame, wrap="word", font=("Consolas", 10))
+            cube_scrollbar = ttk.Scrollbar(cube_frame, orient="vertical", command=cube_text.yview)
+            cube_text.configure(yscrollcommand=cube_scrollbar.set)
             
-            if len(values) > 1:
-                # Вычисляем масштаб
-                width = 700
-                height = 400
-                max_val = max(values)
-                min_val = min(values)
+            cube_scrollbar.pack(side="right", fill="y")
+            cube_text.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+            
+            cube_lines = []
+            cube_lines.append("=" * 70)
+            cube_lines.append(f"СТАТИСТИКА КУБА #{cube_id+1}")
+            cube_lines.append("=" * 70)
+            cube_lines.append("")
+            
+            # Информация о кубе
+            data = self.cube_data[cube_id]
+            current_status = self.cubes_state[cube_id]
+            
+            if current_status in self.face_info:
+                cube_lines.append(f"Текущий статус: {self.face_info[current_status]['status']}")
+            else:
+                cube_lines.append("Текущий статус: Нет данных")
+            
+            cube_lines.append(f"IP адрес: {data.get('ip', 'Неизвестно')}")
+            cube_lines.append(f"Последнее обновление: {datetime.fromtimestamp(self.cubes_last_update[cube_id]).strftime('%H:%M:%S')}")
+            cube_lines.append("")
+            
+            # Время в каждом статусе (только 1-6)
+            cube_lines.append("ВРЕМЯ В КАЖДОМ СТАТУСЕ:")
+            
+            # Собираем все времена для этого куба
+            status_times = {}
+            current_time = time.time()
+            
+            for status in range(1, 7):  # Только статусы 1-6
+                total_time = self.total_time_in_status[cube_id].get(status, 0.0)
                 
-                # Рисуем оси
-                canvas.create_line(50, 50, 50, height - 50, width=2)
-                canvas.create_line(50, height - 50, width - 50, height - 50, width=2)
+                # Добавляем текущее время если это активный статус
+                if status == current_status and status in self.status_start_time[cube_id]:
+                    current_elapsed = current_time - self.status_start_time[cube_id][status]
+                    total_time += current_elapsed
                 
-                # Рисуем график
-                points = []
-                for i, val in enumerate(values[-50:]):  # Последние 50 точек
-                    x = 50 + (i * (width - 100) / min(49, len(values)-1))
-                    y = height - 50 - ((val - min_val) * (height - 100) / max(1, max_val - min_val))
-                    points.append((x, y))
-                    
-                    canvas.create_oval(x-3, y-3, x+3, y+3, fill=self.color_map[val])
+                if total_time > 0:
+                    status_times[status] = total_time
+            
+            # Сортируем по убыванию времени
+            sorted_cube_times = sorted(status_times.items(), key=lambda x: x[1], reverse=True)
+            
+            if sorted_cube_times:
+                total_cube_time = sum(t for _, t in sorted_cube_times)
                 
-                # Соединяем точки
-                for i in range(len(points)-1):
-                    canvas.create_line(points[i][0], points[i][1], 
-                                      points[i+1][0], points[i+1][1], 
-                                      width=2, fill="blue")
-                
-                # Подписи
-                canvas.create_text(width // 2, height - 20, text="Время (последние значения)", font=("Arial", 10))
-                canvas.create_text(20, height // 2, text="Значение", angle=90, font=("Arial", 10))
-                
-                # Легенда значений
-                legend_y = 20
-                for val in range(1, 7):
-                    canvas.create_rectangle(60, legend_y, 80, legend_y + 15, 
-                                           fill=self.color_map[val], outline="black")
-                    color_name = ["Зеленый", "Красный", "Синий", "Желтый", "Оранжевый", "Белый"][val-1]
-                    canvas.create_text(100, legend_y + 7, text=f"= {val} ({color_name})", 
-                                      anchor="w", font=("Arial", 9))
-                    legend_y += 25
+                for status, time_spent in sorted_cube_times:
+                    status_name = self.face_info[status]["status"]
+                    percentage = (time_spent / total_cube_time * 100) if total_cube_time > 0 else 0
+                    cube_lines.append(f"  {status_name}: {self.format_time(time_spent)} ({percentage:.1f}%)")
+            else:
+                cube_lines.append("  Нет данных о времени в статусах")
+            
+            cube_lines.append("")
+            
+            # История изменений (только последние 5 записей)
+            cube_lines.append("ИСТОРИЯ ИЗМЕНЕНИЙ:")
+            if self.history[cube_id]:
+                # Берем только последние 5 записей
+                recent_history = self.history[cube_id][-5:]
+                for record in recent_history:
+                    cube_lines.append(f"  [{record['time']}] → {record['status']}")
+            else:
+                cube_lines.append("  История пуста")
+            
+            cube_text.insert("1.0", "\n".join(cube_lines))
+            cube_text.config(state="disabled")
+        
+        # Если нет активных кубов, добавляем заглушку
+        if not active_cube_ids:
+            no_data_frame = ttk.Frame(notebook)
+            notebook.add(no_data_frame, text="Нет данных")
+            
+            no_data_label = ttk.Label(no_data_frame, 
+                                     text="Нет активных кубов для отображения статистики",
+                                     font=("Arial", 12))
+            no_data_label.pack(expand=True, padx=20, pady=20)
         
         # Кнопка экспорта
-        export_btn = ttk.Button(stats_window, text="📥 Экспорт данных", 
-                               command=self.export_data)
-        export_btn.pack(pady=10)
-    
-    def show_settings(self):
-        """Окно настроек"""
-        settings_window = tk.Toplevel(self.root)
-        settings_window.title("Настройки")
-        settings_window.geometry("400x300")
-        
-        ttk.Label(settings_window, text="Настройки ESP Squares Monitor", 
-                 font=("Arial", 14, "bold")).pack(pady=10)
-        
-        # Настройки соединения
-        conn_frame = ttk.LabelFrame(settings_window, text="Настройки соединения")
-        conn_frame.pack(fill="x", padx=20, pady=10)
-        
-        ttk.Label(conn_frame, text="IP адрес ESP:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ip_entry = ttk.Entry(conn_frame, textvariable=self.ip_var, width=20)
-        ip_entry.grid(row=0, column=1, padx=5, pady=5)
-        
-        ttk.Label(conn_frame, text="Интервал обновления (сек):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        interval_entry = ttk.Entry(conn_frame, textvariable=self.interval_var, width=10)
-        interval_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        
-        # Настройки эмуляции
-        emul_frame = ttk.LabelFrame(settings_window, text="Настройки эмуляции")
-        emul_frame.pack(fill="x", padx=20, pady=10)
-        
-        emulate_var = tk.BooleanVar(value=self.emulate_check.get())
-        emulate_check = ttk.Checkbutton(emul_frame, text="Эмулировать данные для ESP #2-10",
-                                       variable=emulate_var)
-        emulate_check.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        
-        # Кнопки
-        btn_frame = ttk.Frame(settings_window)
-        btn_frame.pack(pady=20)
-        
-        def save_settings():
-            self.esp_ip = ip_entry.get()
+        def export_stats():
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"cube_stats_{timestamp}.json"
+            
             try:
-                self.update_interval = int(interval_entry.get())
-            except:
-                messagebox.showerror("Ошибка", "Интервал должен быть числом")
-                return
-            
-            self.emulate_check.set(emulate_var.get())
-            settings_window.destroy()
-            messagebox.showinfo("Сохранено", "Настройки сохранены")
+                data = {
+                    "export_time": datetime.now().isoformat(),
+                    "server_ip": self.computer_ip,
+                    "total_cubes": self.total_cubes,
+                    "cube_data": {},
+                    "time_stats": {}
+                }
+                
+                for cube_id in range(self.total_cubes):
+                    data["cube_data"][cube_id] = self.cube_data.get(cube_id, {})
+                    # Экспортируем только время для статусов 1-6
+                    filtered_times = {k: v for k, v in self.total_time_in_status[cube_id].items() 
+                                     if k in self.face_info}
+                    data["time_stats"][cube_id] = dict(filtered_times)
+                
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                
+                messagebox.showinfo("Успех", f"Статистика экспортирована в файл:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось экспортировать данные:\n{str(e)}")
         
-        ttk.Button(btn_frame, text="Сохранить", command=save_settings).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Отмена", command=settings_window.destroy).pack(side="left", padx=5)
-    
-    def export_data(self):
-        """Экспорт данных в файл"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"esp_squares_data_{timestamp}.json"
-        
-        try:
-            data = {
-                "export_time": datetime.now().isoformat(),
-                "esp_ip": self.esp_ip,
-                "total_squares": self.total_squares,
-                "current_state": self.squares_state,
-                "history": self.history,
-                "total_counts": dict(self.total_counts)
-            }
-            
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            messagebox.showinfo("Успех", f"Данные экспортированы в файл:\n{filename}")
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось экспортировать данные:\n{str(e)}")
+        ttk.Button(stats_window, text="📥 Экспорт статистики", 
+                  command=export_stats).pack(pady=10)
 
 def main():
     root = tk.Tk()
-    app = ESPSquaresMonitor(root)
+    app = CubeServer(root)
     
-    # Запускаем цикл обработки событий
+    messagebox.showinfo("Cube Server", 
+        f"Программа запущена!\n\n"
+        f"Ваш IP адрес: {app.computer_ip}\n"
+        f"Порт сервера: {app.server_port}\n\n"
+        f"Для подключения ESP измените в его коде строку:\n"
+        f'const char* serverIP = "{app.computer_ip}";')
+    
     root.mainloop()
 
 if __name__ == "__main__":
