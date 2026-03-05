@@ -1,5 +1,5 @@
-#include <WiFi.h>
-#include <WebServer.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
 #include <ArduinoJson.h>
 
 // ========== НАСТРОЙКИ ТОЧКИ ДОСТУПА ==========
@@ -7,7 +7,7 @@ const char* ssid = "SmartHive_AP";
 const char* password = "12345678";
 
 // ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-WebServer server(80);
+ESP8266WebServer server(80);
 
 // Данные с датчиков
 struct SensorData {
@@ -130,19 +130,6 @@ const char index_html[] PROGMEM = R"rawliteral(
       padding: 20px;
       margin-top: 30px;
     }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 20px;
-    }
-    th, td {
-      border: 1px solid #ddd;
-      padding: 12px;
-      text-align: left;
-    }
-    th {
-      background: #f2f2f2;
-    }
   </style>
 </head>
 <body>
@@ -217,7 +204,6 @@ const char index_html[] PROGMEM = R"rawliteral(
     };
     
     function updateCards(data) {
-      // Обновляем значения
       document.getElementById('tempValue').textContent = data.temperature.toFixed(1);
       document.getElementById('humValue').textContent = data.humidity.toFixed(1);
       document.getElementById('gasValue').textContent = data.gas;
@@ -225,7 +211,6 @@ const char index_html[] PROGMEM = R"rawliteral(
       document.getElementById('weightValue').textContent = data.weight.toFixed(2);
       document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
       
-      // Обновляем статус тревоги
       const alertCard = document.getElementById('alertCard');
       const alertValue = document.getElementById('alertValue');
       const statusBar = document.getElementById('statusBar');
@@ -248,7 +233,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         statusText.textContent = 'СТАТУС: Норма. Все системы работают';
       }
       
-      // Обновляем цветовые индикаторы
       document.getElementById('tempCard').className = 
         data.temperature > 35 ? 'card warning' : 'card';
       document.getElementById('humCard').className = 
@@ -256,10 +240,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       document.getElementById('gasCard').className = 
         data.gas > 250 ? 'card warning' : 'card';
         
-      // Добавляем в историю
       addToHistory(data);
-      
-      // Обновляем JSON данные
       document.getElementById('jsonData').textContent = JSON.stringify(data, null, 2);
     }
     
@@ -272,7 +253,6 @@ const char index_html[] PROGMEM = R"rawliteral(
       dataHistory.sound.push(data.sound);
       dataHistory.weight.push(data.weight);
       
-      // Ограничиваем размер истории
       Object.keys(dataHistory).forEach(key => {
         if (dataHistory[key].length > maxItems) {
           dataHistory[key].shift();
@@ -304,7 +284,6 @@ const char index_html[] PROGMEM = R"rawliteral(
     function drawChart() {
       const ctx = document.getElementById('dataChart').getContext('2d');
       
-      // Создаем график
       new Chart(ctx, {
         type: 'line',
         data: {
@@ -355,7 +334,7 @@ const char index_html[] PROGMEM = R"rawliteral(
               position: 'right',
               title: {
                 display: true,
-                text: 'Газ/Звук'
+                text: 'Газ'
               },
               grid: {
                 drawOnChartArea: false
@@ -366,16 +345,11 @@ const char index_html[] PROGMEM = R"rawliteral(
       });
     }
     
-    // Автообновление каждые 2 секунды
     setInterval(refreshData, 2000);
     
-    // Первоначальная загрузка
     window.onload = function() {
       refreshData();
-      
-      // Заменяем заглушки на реальные данные
-      document.getElementById('gasStatus').textContent = 
-        'Порог тревоги: 300 ед.';
+      document.getElementById('gasStatus').textContent = 'Порог тревоги: 300 ед.';
     };
   </script>
   
@@ -439,7 +413,6 @@ void parseSensorData(String data) {
 void handleRoot() {
   String html = String(index_html);
   
-  // Заменяем плейсхолдеры
   html.replace("%TEMPERATURE%", String(sensorData.temperature, 1));
   html.replace("%HUMIDITY%", String(sensorData.humidity, 1));
   html.replace("%GAS%", String(sensorData.gas));
@@ -490,10 +463,9 @@ void handleNotFound() {
 
 // ========== SETUP ==========
 void setup() {
-  Serial.begin(115200);  // Для отладки
-  Serial2.begin(115200); // Для связи с Arduino
+  Serial.begin(9600);  // Для связи с Arduino
   
-  // Создаем точку доступа
+  // Создаем точку доступа для ESP8266
   Serial.println("Создание точки доступа...");
   WiFi.softAP(ssid, password);
   
@@ -522,18 +494,17 @@ void setup() {
 void loop() {
   server.handleClient();
   
-  // Чтение данных с Arduino
-  if (Serial2.available()) {
-    String data = Serial2.readStringUntil('\n');
+  // Чтение данных с Arduino через Serial (USB/GPIO)
+  if (Serial.available()) {
+    String data = Serial.readStringUntil('\n');
     data.trim();
     
-    if (data.length() > 5) { // Минимальная длина валидных данных
+    if (data.length() > 5) {
       Serial.print("Получено: ");
       Serial.println(data);
       
       parseSensorData(data);
       
-      // Вывод в Serial для отладки
       Serial.printf("Температура: %.1f°C, Влажность: %.1f%%, Газ: %d, Звук: %d, Вес: %.2fкг, Тревога: %s\n",
                    sensorData.temperature, sensorData.humidity, sensorData.gas,
                    sensorData.sound, sensorData.weight, sensorData.alert ? "ДА" : "нет");
