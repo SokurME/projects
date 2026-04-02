@@ -8,13 +8,14 @@ const char* ssid = "ASUSBOOK5398";      // Имя WiFi сети
 const char* password = "79q=98T1";      // Пароль WiFi сети
 
 // IP адрес компьютера (узнайте из Python программы)
-const char* serverIP = "10.158.246.29";  // ЗАМЕНИТЕ на ваш IP!
+const char* serverIP = "192.168.1.62";  // ЗАМЕНИТЕ на ваш IP!
 const int serverPort = 8000;             // Порт сервера
 
 // Конфигурация MPU6050
 #define MPU6050_ADDR 0x68
 #define SDA_PIN 4    // GPIO4 (D2)
 #define SCL_PIN 5    // GPIO5 (D1)
+#define CUBE_ID 1 // ID Куба
 
 // Текущее состояние
 String currentFace = "Неизвестно";
