@@ -1,29 +1,22 @@
 // ========== НАСТРОЙКИ ПРОЕКТА ==========
 #define TIME_INTERVAL 1000        // Интервал опроса датчиков (мс)
 #define GAS_THRESHOLD_PPM 2000    // Порог срабатывания датчика газа (ppm CO2)
-#define SERVO_DELAY 5000          // Время вращения сервы при тревоге (мс)
-#define DEBUG 0
+#define SERVO_DURATION 3000       // Время вращения сервы (мс) - время открытия/закрытия
+#define DEBUG 0                   // 1 - включить отладку, 0 - выключить
 #define SMOOTHING_WINDOW 10       // Размер окна скользящего среднего
 
-// Для сервопривода ПОСТОЯННОГО ВРАЩЕНИЯ:
-// 90 = СТОП
-// 0 = полный ход в одну сторону
-// 180 = полный ход в другую сторону
+// Для сервопривода ПОСТОЯННОГО ВРАЩЕНИЯ
 #define SERVO_STOP 90
-#define SERVO_FORWARD 0           // Направление для тревоги (можно поменять на 180)
+#define SERVO_OPEN 0              // Вперед - открыть крышку
+#define SERVO_CLOSE 180           // Назад - закрыть крышку
 
 // ========== ОПРЕДЕЛЕНИЕ ПИНОВ ==========
-// Датчики
-#define DHT_PIN 2                // DHT11
-#define GAS_PIN A0               // MQ135 датчик газа (аналоговый выход)
-#define MIC_PIN A1               // MAX9814
-#define BUZZER_PIN 3             // Пьезопищалка (опционально)
-
-// Тензодатчик (HX711)
+#define DHT_PIN 2                
+#define GAS_PIN A0               
+#define MIC_PIN A1               
+#define BUZZER_PIN 3             
 #define HX711_DOUT 4
 #define HX711_SCK 5
-
-// Сервопривод
 #define SERVO_PIN 9
 
 // ========== БИБЛИОТЕКИ ==========
@@ -36,36 +29,28 @@
 DHT dht(DHT_PIN, DHT11);
 HX711 scale;
 Servo servo;
-
 MQ135 gasSensor = MQ135(GAS_PIN);
 
-// ========== КЛАСС ДЛЯ СКОЛЬЗЯЩЕГО СРЕДНЕГО ==========
+// ========== ОПТИМИЗИРОВАННЫЙ КЛАСС ДЛЯ СКОЛЬЗЯЩЕГО СРЕДНЕГО ==========
 class MovingAverage {
 private:
-  float buffer[SMOOTHING_WINDOW];
-  int index;
-  int count;
-  float sum;
+  int16_t buffer[SMOOTHING_WINDOW];
+  uint8_t index;
+  uint8_t count;
+  int32_t sum;
   
 public:
-  MovingAverage() {
-    index = 0;
-    count = 0;
-    sum = 0;
-    for (int i = 0; i < SMOOTHING_WINDOW; i++) {
-      buffer[i] = 0;
-    }
+  MovingAverage() : index(0), count(0), sum(0) {
+    memset(buffer, 0, sizeof(buffer));
   }
   
-  float addValue(float value) {
+  int16_t addValue(int16_t value) {
     if (count < SMOOTHING_WINDOW) {
-      // Заполняем буфер
       buffer[count] = value;
       sum += value;
       count++;
       return sum / count;
     } else {
-      // Замещаем старые значения
       sum -= buffer[index];
       buffer[index] = value;
       sum += value;
@@ -78,39 +63,65 @@ public:
     index = 0;
     count = 0;
     sum = 0;
+    memset(buffer, 0, sizeof(buffer));
+  }
+  
+  void forceValue(int16_t value) {
+    for (int i = 0; i < SMOOTHING_WINDOW; i++) {
+      buffer[i] = value;
+    }
+    sum = value * SMOOTHING_WINDOW;
+    count = SMOOTHING_WINDOW;
+    index = 0;
   }
 };
 
 // ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+// Объекты для скользящего среднего
 MovingAverage tempAvg;
 MovingAverage humAvg;
 MovingAverage gasAvg;
 MovingAverage micAvg;
 MovingAverage weightAvg;
 
-float rawTemperature = 0;
-float rawHumidity = 0;
-float rawGasPPM = 0;
-int rawMicValue = 0;
-float rawWeight = 0;
+// Сырые данные
+int16_t rawTemperature = 0;
+int16_t rawHumidity = 0;
+int16_t rawGasPPM = 0;
+int16_t rawMicValue = 0;
+int16_t rawWeight = 0;
 
-float temperature = 0;
-float humidity = 0;
-float gasPPM = 0;
-int micValue = 0;
-float weight = 0;
+// Усреднённые данные
+int16_t temperature = 0;
+int16_t humidity = 0;
+int16_t gasPPM = 0;
+int16_t micValue = 0;
+int16_t weight = 0;
 
-bool gasAlert = false;
-unsigned long lastServoMove = 0;
-bool servoCommandSent = false;
-
-// Для демо-режима
-bool demoMode = false;
+// Состояния системы
+bool lidOpen = false;           // Крышка открыта (газ превышен)
+bool servoMoving = false;       // Серво в движении
+bool demoMode = false;          // Демо-режим
+unsigned long servoStartTime = 0;
 unsigned long demoStartTime = 0;
-float savedGasPPM = 0;
+
+// Демо-режим
+int16_t savedGasPPM = 0;
+int16_t savedRawGasPPM = 0;
+bool savedLidOpen = false;
 
 // Калибровка тензодатчика
-const float CALIBRATION_FACTOR = -96650.0;
+const float CALIBRATION_FACTOR = 556;
+
+// ========== ПРОТОТИПЫ ФУНКЦИЙ ==========
+void readSensors();
+void applySmoothing();
+void checkGasAndControlLid();
+void sendDataToESP();
+void calibrateScale();
+void resetFilters();
+void moveLid(int direction);
+void stopLid();
 
 // ========== SETUP ==========
 void setup() {
@@ -118,27 +129,23 @@ void setup() {
   
   dht.begin();
   scale.begin(HX711_DOUT, HX711_SCK);
+  scale.set_scale(CALIBRATION_FACTOR);
+  scale.tare();
+  delay(100);
   
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(MIC_PIN, INPUT);
   
-  // scale.set_scale(CALIBRATION_FACTOR);
-  // scale.tare();
-  
-  // ИНИЦИАЛИЗАЦИЯ СЕРВО ПОСТОЯННОГО ВРАЩЕНИЯ
   servo.attach(SERVO_PIN);
   delay(100);
-  servo.write(SERVO_STOP);    // СТОП
+  servo.write(SERVO_STOP);
   delay(500);
   
   delay(2000);
+  
   #if DEBUG == 1
-  Serial.println("========================================");
-  Serial.println("System initialized");
-  Serial.println("Порог тревоги: 2000 ppm CO2");
-  Serial.println("Сервопривод постоянного вращения");
-  Serial.println("Скользящее среднее: 10 значений");
-  Serial.println("========================================");
+  Serial.println(F("System initialized"));
+  Serial.println(F("Logic: Open lid on gas > 2000ppm, close lid when gas normal"));
   #endif
 }
 
@@ -146,207 +153,373 @@ void setup() {
 void loop() {
   static unsigned long lastUpdate = 0;
   
-  // Опрос датчиков (раз в секунду)
   if (millis() - lastUpdate >= TIME_INTERVAL) {
     lastUpdate = millis();
     
     readSensors();
-    applySmoothing();         // Применяем скользящее среднее
-    processGasAlert();
+    applySmoothing();
+    checkGasAndControlLid();
     sendDataToESP();
   }
   
-  // Остановка вращения через заданное время
-  if (gasAlert && (millis() - lastServoMove >= SERVO_DELAY)) {
-    servo.write(SERVO_STOP);    // СТОП
-    delay(15);
-    gasAlert = false;
-    servoCommandSent = false;
-    #if DEBUG == 1
-    Serial.println("🔄 Серво остановлен (таймаут)");
-    #endif
+  // Остановка серво после завершения движения
+  if (servoMoving && (millis() - servoStartTime >= SERVO_DURATION)) {
+    stopLid();
   }
   
-  // Демо-режим
-  if (demoMode && (millis() - demoStartTime >= 3000)) {
-    demoMode = false;
-    gasPPM = savedGasPPM;
+  // Завершение демо-режима
+  if (demoMode && (millis() - demoStartTime >= 5000)) {
+    #if DEBUG == 1
+    Serial.println(F("=== EXITING DEMO MODE ==="));
+    #endif
     
-    if (gasAlert) {
-      servo.write(SERVO_STOP);
-      delay(15);
-      gasAlert = false;
-      servoCommandSent = false;
+    demoMode = false;
+    
+    // Восстанавливаем реальные значения
+    gasAvg.reset();
+    rawGasPPM = savedRawGasPPM;
+    
+    for (int i = 0; i < SMOOTHING_WINDOW; i++) {
+      gasPPM = gasAvg.addValue(rawGasPPM);
+    }
+    
+    #if DEBUG == 1
+    Serial.print(F("Real gas value: "));
+    Serial.println(gasPPM);
+    #endif
+    
+    // Если реальный газ в норме и крышка открыта - закрываем
+    if (gasPPM <= GAS_THRESHOLD_PPM && lidOpen) {
+      #if DEBUG == 1
+      Serial.println(F("Gas normal, closing lid..."));
+      #endif
+      
+      if (servoMoving) {
+        servo.write(SERVO_STOP);
+        delay(15);
+        servoMoving = false;
+      }
+      
+      moveLid(SERVO_CLOSE);
+      lidOpen = false;
     }
     
     Serial.println("DEMO_END");
-    #if DEBUG == 1
-    Serial.println("🏁 Демо-режим завершён");
-    #endif
   }
   
-  // Команды от ESP8266
+  // Обработка команд
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     
     if (cmd == "DEMO_ALERT") {
-      if (!demoMode && !gasAlert) {
+      if (!demoMode) {
         demoMode = true;
         demoStartTime = millis();
+        
         savedGasPPM = gasPPM;
-        rawGasPPM = 2500;         // Сырое значение для демо
-        applySmoothing();          // Применяем сглаживание
-        processGasAlert();
+        savedRawGasPPM = rawGasPPM;
+        savedLidOpen = lidOpen;
+        
+        #if DEBUG == 1
+        Serial.println(F("=== DEMO MODE START ==="));
+        #endif
+        
+        // Симулируем превышение газа
+        gasAvg.forceValue(2500);
+        gasPPM = 2500;
+        rawGasPPM = 2500;
+        
+        // Если крышка закрыта - открываем
+        if (!lidOpen) {
+          #if DEBUG == 1
+          Serial.println(F("DEMO: Opening lid..."));
+          #endif
+          
+          if (servoMoving) {
+            servo.write(SERVO_STOP);
+            delay(15);
+            servoMoving = false;
+          }
+          
+          moveLid(SERVO_OPEN);
+          lidOpen = true;
+          
+          // Звуковой сигнал
+          for (int i = 0; i < 3; i++) {
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(100);
+            digitalWrite(BUZZER_PIN, LOW);
+            delay(100);
+          }
+        }
         
         Serial.println("DEMO_START");
-        #if DEBUG == 1
-        Serial.println("🎬 Демо: CO2 = 2500 ppm");
-        #endif
       }
+    }
+    
+    else if (cmd == "CALIBRATE") {
+      calibrateScale();
+    }
+    
+    else if (cmd == "RESET_FILTERS") {
+      resetFilters();
+      Serial.println(F("FILTERS_RESET"));
+    }
+    
+    else if (cmd == "TARE") {
+      scale.tare();
+      Serial.println(F("TARE_OK"));
     }
   }
 }
 
-// ========== ЧТЕНИЕ ДАННЫХ С ДАТЧИКОВ ==========
-void readSensors() {
-  rawTemperature = dht.readTemperature();
-  rawHumidity = dht.readHumidity();
+// ========== УПРАВЛЕНИЕ КРЫШКОЙ ПО СОСТОЯНИЮ ГАЗА ==========
+void checkGasAndControlLid() {
+  static bool previousGasState = false;
   
-  if (!demoMode) {
-    if (!isnan(rawTemperature) && !isnan(rawHumidity) && rawTemperature > -50 && rawHumidity >= 0 && rawHumidity <= 100) {
-      rawGasPPM = gasSensor.getCorrectedPPM(rawTemperature, rawHumidity);
+  if (demoMode) return;
+  
+  bool currentGasState = (gasPPM > GAS_THRESHOLD_PPM);
+  
+  // Только при изменении состояния
+  if (currentGasState != previousGasState) {
+    if (currentGasState) {
+      // Газ превышен - открываем крышку
+      #if DEBUG == 1
+      Serial.print(F("GAS EXCEEDED! CO2: "));
+      Serial.print(gasPPM);
+      Serial.println(F(" ppm - Opening lid"));
+      #endif
+      
+      if (!lidOpen) {
+        moveLid(SERVO_OPEN);
+        lidOpen = true;
+        
+        // Звуковой сигнал тревоги
+        for (int i = 0; i < 3; i++) {
+          digitalWrite(BUZZER_PIN, HIGH);
+          delay(100);
+          digitalWrite(BUZZER_PIN, LOW);
+          delay(100);
+        }
+      }
     } else {
-      rawGasPPM = gasSensor.getPPM();
+      // Газ в норме - закрываем крышку
+      #if DEBUG == 1
+      Serial.print(F("Gas normal. CO2: "));
+      Serial.print(gasPPM);
+      Serial.println(F(" ppm - Closing lid"));
+      #endif
+      
+      if (lidOpen) {
+        moveLid(SERVO_CLOSE);
+        lidOpen = false;
+      }
+    }
+    
+    previousGasState = currentGasState;
+  }
+}
+
+// ========== ДВИЖЕНИЕ КРЫШКИ ==========
+void moveLid(int direction) {
+  // Останавливаем текущее движение
+  if (servoMoving) {
+    servo.write(SERVO_STOP);
+    delay(15);
+    servoMoving = false;
+    delay(50);
+  }
+  
+  // Запускаем движение
+  servo.write(direction);
+  delay(15);
+  servoMoving = true;
+  servoStartTime = millis();
+  
+  #if DEBUG == 1
+  Serial.print(F("Lid moving: "));
+  Serial.println(direction == SERVO_OPEN ? "OPEN" : "CLOSE");
+  #endif
+}
+
+// ========== ОСТАНОВКА ДВИЖЕНИЯ ==========
+void stopLid() {
+  if (servoMoving) {
+    servo.write(SERVO_STOP);
+    delay(15);
+    servoMoving = false;
+    
+    #if DEBUG == 1
+    Serial.println(F("Lid stopped"));
+    #endif
+  }
+}
+
+// ========== ЧТЕНИЕ ДАТЧИКОВ ==========
+void readSensors() {
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  
+  if (!isnan(t) && !isnan(h) && t > -50 && t < 100 && h >= 0 && h <= 100) {
+    rawTemperature = (int16_t)(t * 10.0);
+    rawHumidity = (int16_t)(h * 10.0);
+    
+    if (!demoMode) {
+      rawGasPPM = (int16_t)gasSensor.getCorrectedPPM(t, h);
+    }
+  } else {
+    rawTemperature = -990;
+    rawHumidity = -990;
+    if (!demoMode) {
+      rawGasPPM = (int16_t)gasSensor.getPPM();
     }
   }
   
   rawMicValue = analogRead(MIC_PIN);
   
   if (scale.is_ready()) {
-    rawWeight = scale.get_units(5);
+    float w = scale.get_units(10);
+    if (w < 0 && w > -5) w = 0;
+    rawWeight = (int16_t)(w * 100.0);
+  } else {
+    rawWeight = weight;
   }
   
-  if (isnan(rawTemperature) || isnan(rawHumidity)) {
-    rawTemperature = -99;
-    rawHumidity = -99;
-  }
-  
-  if (rawGasPPM < 300 || rawGasPPM > 5000) {
+  if (!demoMode && (rawGasPPM < 300 || rawGasPPM > 5000)) {
     static unsigned long lastWarning = 0;
     if (millis() - lastWarning > 10000) {
-       #if DEBUG == 1
-      Serial.print("⚠️ Предупреждение: нереалистичное значение CO2: ");
+      #if DEBUG == 1
+      Serial.print(F("Warning: unrealistic gas value: "));
       Serial.println(rawGasPPM);
       #endif
       lastWarning = millis();
     }
+    rawGasPPM = 400;
   }
+  
+  #if DEBUG == 1
+  static unsigned long lastDebugPrint = 0;
+  if (millis() - lastDebugPrint > 10000) {
+    Serial.println(F("--- Raw Data ---"));
+    Serial.print(F("Temp: ")); Serial.print(rawTemperature / 10.0);
+    Serial.print(F(" | Hum: ")); Serial.print(rawHumidity / 10.0);
+    Serial.print(F(" | Gas: ")); Serial.print(rawGasPPM);
+    Serial.print(F(" | Lid: ")); Serial.print(lidOpen ? "OPEN" : "CLOSED");
+    Serial.print(F(" | Weight: ")); Serial.println(rawWeight / 100.0);
+    lastDebugPrint = millis();
+  }
+  #endif
 }
 
 // ========== ПРИМЕНЕНИЕ СКОЛЬЗЯЩЕГО СРЕДНЕГО ==========
 void applySmoothing() {
-  // Применяем фильтр только для корректных значений
-  if (rawTemperature != -99 && rawTemperature > -50 && rawTemperature < 100) {
+  if (rawTemperature > -500) {
     temperature = tempAvg.addValue(rawTemperature);
   } else {
-    temperature = -99;
+    temperature = -990;
   }
   
-  if (rawHumidity != -99 && rawHumidity >= 0 && rawHumidity <= 100) {
+  if (rawHumidity > -500) {
     humidity = humAvg.addValue(rawHumidity);
   } else {
-    humidity = -99;
+    humidity = -990;
   }
   
-  if (rawGasPPM >= 300 && rawGasPPM <= 5000) {
+  if (!demoMode) {
     gasPPM = gasAvg.addValue(rawGasPPM);
-  } else {
-    gasPPM = gasAvg.addValue(400); // Подставляем нормальное значение для фильтра
   }
   
-  micValue = (int)micAvg.addValue((float)rawMicValue);
+  micValue = micAvg.addValue(rawMicValue);
   weight = weightAvg.addValue(rawWeight);
-}
-
-// ========== ОБРАБОТКА ПРЕВЫШЕНИЯ ГАЗА ==========
-void processGasAlert() {
-  if (gasPPM > GAS_THRESHOLD_PPM && !gasAlert && !servoCommandSent) {
-    gasAlert = true;
-    servoCommandSent = true;
-    
-    // ЗАПУСКАЕМ ВРАЩЕНИЕ (полный ход)
-    servo.write(SERVO_FORWARD);
-    delay(15);
-    lastServoMove = millis();
-    
-    // Сигнал тревоги
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(BUZZER_PIN, HIGH);
-      delay(100);
-      digitalWrite(BUZZER_PIN, LOW);
-      delay(100);
-    }
-     #if DEBUG == 1
-    Serial.print("🚨 GAS ALERT! CO2: ");
-    Serial.print(gasPPM);
-    Serial.println(" ppm (превышен порог 2000 ppm)");
-    Serial.println("🔧 Серво начал вращение");
-    #endif
+  
+  #if DEBUG == 1
+  static unsigned long lastDebugPrintAvg = 0;
+  if (millis() - lastDebugPrintAvg > 10000) {
+    Serial.println(F("--- Smoothed Data ---"));
+    Serial.print(F("Temp: ")); Serial.print(temperature / 10.0, 1);
+    Serial.print(F(" | Hum: ")); Serial.print(humidity / 10.0, 1);
+    Serial.print(F(" | Gas: ")); Serial.print(gasPPM);
+    Serial.print(F(" | Lid: ")); Serial.println(lidOpen ? "OPEN" : "CLOSED");
+    lastDebugPrintAvg = millis();
   }
+  #endif
 }
 
-// ========== ПЕРЕДАЧА ДАННЫХ НА ESP ==========
+// ========== ОТПРАВКА ДАННЫХ ==========
 void sendDataToESP() {
-  Serial.print("T:");
-  if (temperature == -99) {
-    Serial.print("0.0");
+  Serial.print(F("T:"));
+  if (temperature == -990) {
+    Serial.print(F("0.0"));
   } else {
-    Serial.print(temperature, 1);
+    Serial.print(temperature / 10.0, 1);
   }
   
-  Serial.print(",H:");
-  if (humidity == -99) {
-    Serial.print("0.0");
+  Serial.print(F(",H:"));
+  if (humidity == -990) {
+    Serial.print(F("0.0"));
   } else {
-    Serial.print(humidity, 1);
+    Serial.print(humidity / 10.0, 1);
   }
   
-  Serial.print(",G:");
-  Serial.print(gasPPM, 1);
+  Serial.print(F(",G:"));
+  Serial.print(gasPPM);
   
-  Serial.print(",M:");
+  Serial.print(F(",M:"));
   Serial.print(micValue);
   
-  Serial.print(",W:");
-  Serial.print(weight, 2);
+  Serial.print(F(",W:"));
+  Serial.print(weight / 100.0, 2);
   
-  Serial.print(",A:");
-  Serial.print(gasAlert ? "1" : "0");
+  Serial.print(F(",L:"));
+  Serial.print(lidOpen ? "1" : "0");
   
   Serial.println();
 }
 
-// ========== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ==========
+// ========== КАЛИБРОВКА ==========
 void calibrateScale() {
-   #if DEBUG == 1
-  Serial.println("Calibrating scale...");
-  Serial.println("Remove all weight from scale");
-  #endif
+  Serial.println(F("=== КАЛИБРОВКА ТЕНЗОДАТЧИКА ==="));
+  Serial.println(F("1. Уберите весь вес"));
   delay(3000);
   
   scale.tare();
-   #if DEBUG == 1
-  Serial.println("Tare done");
+  Serial.println(F("Тара сброшена"));
   
-  Serial.println("Place known weight on scale");
-  #endif
+  Serial.println(F("2. Положите груз 672 грамма"));
   delay(5000);
   
   float reading = scale.get_units(10);
-  float factor = reading / 1000.0;
-   #if DEBUG == 1
-  Serial.print("Calibration factor: ");
-  Serial.println(factor);
+  float knownWeight = 672.0;
+  
+  if (reading != 0) {
+    float newFactor = reading / knownWeight;
+    Serial.print(F("Новый коэффициент: "));
+    Serial.println(newFactor, 4);
+    Serial.println(F("Обновите CALIBRATION_FACTOR:"));
+    Serial.print(F("const float CALIBRATION_FACTOR = "));
+    Serial.print(newFactor, 4);
+    Serial.println(F(";"));
+    
+    scale.set_scale(newFactor);
+    Serial.print(F("Проверка: "));
+    Serial.print(scale.get_units(10), 2);
+    Serial.println(F(" грамм"));
+  }
+  
+  Serial.println(F("=== КАЛИБРОВКА ЗАВЕРШЕНА ==="));
+}
+
+// ========== СБРОС ФИЛЬТРОВ ==========
+void resetFilters() {
+  tempAvg.reset();
+  humAvg.reset();
+  gasAvg.reset();
+  micAvg.reset();
+  weightAvg.reset();
+  
+  #if DEBUG == 1
+  Serial.println(F("Filters reset"));
   #endif
 }

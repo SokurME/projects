@@ -2,13 +2,16 @@
 #include <ESP8266WebServer.h>
 #include <ArduinoJson.h>
 
+// ========== НАСТРОЙКИ ОТЛАДКИ ==========
+#define DEBUG 0  // 1 - включить отладку, 0 - выключить
+
 // ========== НАСТРОЙКИ ТОЧКИ ДОСТУПА ==========
 const char* ssid = "SmartHive_AP";
 const char* password = "12345678";
 
 // ========== НАСТРОЙКИ ФИЛЬТРАЦИИ ==========
-#define MIN_TEMP -10.0
-#define MAX_TEMP 60.0
+#define MIN_TEMP -20.0
+#define MAX_TEMP 80.0
 #define MIN_HUM 0.0
 #define MAX_HUM 100.0
 #define MIN_GAS 300.0      // Минимальное адекватное значение CO2 (ppm)
@@ -367,72 +370,124 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// ========== ФУНКЦИЯ ФИЛЬТРАЦИИ ==========
-bool isValidSensorData(float temp, float hum, float gas, int sound, float weight) {
-  if (temp < MIN_TEMP || temp > MAX_TEMP) return false;
-  if (hum < MIN_HUM || hum > MAX_HUM) return false;
-  if (gas < MIN_GAS || gas > MAX_GAS) return false;
-  if (sound < MIN_SOUND || sound > MAX_SOUND) return false;
-  if (weight < MIN_WEIGHT || weight > MAX_WEIGHT) return false;
-  return true;
-}
-
-// ========== ПАРСИНГ ДАННЫХ С ARDUINO ==========
+// ========== ПАРСИНГ ДАННЫХ С ARDUINO (универсальный) ==========
 void parseSensorData(String data) {
-  // Формат: T:25.5,H:60,G:245,M:512,W:12.34,A:0
+  float temp = sensorData.temperature;
+  float hum = sensorData.humidity;
+  float gas = sensorData.gas;
+  int sound = sensorData.sound;
+  float weight = sensorData.weight;
+  bool alert = sensorData.alert;
   
-  float temp = -99;
-  float hum = -99;
-  float gas = -99;
-  int sound = -1;
-  float weight = -99;
-  bool alert = false;
+  bool hasValidData = false;
   
-  // Температура
-  int tempStart = data.indexOf("T:");
-  int tempEnd = data.indexOf(",H:");
-  if (tempStart != -1 && tempEnd != -1) {
-    temp = data.substring(tempStart + 2, tempEnd).toFloat();
+  // Разбиваем строку на части по запятым
+  int start = 0;
+  int end = data.indexOf(',');
+  
+  // Добавляем запятую в конец для обработки последнего параметра
+  String workData = data;
+  if (!workData.endsWith(",")) {
+    workData += ",";
   }
   
-  // Влажность
-  int humStart = data.indexOf(",H:");
-  int humEnd = data.indexOf(",G:");
-  if (humStart != -1 && humEnd != -1) {
-    hum = data.substring(humStart + 3, humEnd).toFloat();
+  while (end > 0) {
+    String pair = workData.substring(start, end);
+    pair.trim();
+    
+    if (pair.length() > 2 && pair.indexOf(':') > 0) {
+      String key = pair.substring(0, pair.indexOf(':'));
+      String value = pair.substring(pair.indexOf(':') + 1);
+      
+      #if DEBUG == 1
+        Serial.printf("Парсим: ключ=%s, значение=%s\n", key.c_str(), value.c_str());
+      #endif
+      
+      if (key == "T") {
+        float newTemp = value.toFloat();
+        if (newTemp >= MIN_TEMP && newTemp <= MAX_TEMP) {
+          temp = newTemp;
+          hasValidData = true;
+          #if DEBUG == 1
+            Serial.printf("✅ Температура принята: %.1f°C\n", temp);
+          #endif
+        } else {
+          #if DEBUG == 1
+            Serial.printf("⚠️ Температура отброшена (некорректная): %.1f°C\n", newTemp);
+          #endif
+        }
+      }
+      else if (key == "H") {
+        float newHum = value.toFloat();
+        if (newHum >= MIN_HUM && newHum <= MAX_HUM) {
+          hum = newHum;
+          hasValidData = true;
+          #if DEBUG == 1
+            Serial.printf("✅ Влажность принята: %.1f%%\n", hum);
+          #endif
+        } else {
+          #if DEBUG == 1
+            Serial.printf("⚠️ Влажность отброшена (некорректная): %.1f%%\n", newHum);
+          #endif
+        }
+      }
+      else if (key == "G") {
+        float newGas = value.toFloat();
+        if (newGas >= MIN_GAS && newGas <= MAX_GAS) {
+          gas = newGas;
+          hasValidData = true;
+          #if DEBUG == 1
+            Serial.printf("✅ Газ принят: %.1f ppm\n", gas);
+          #endif
+        } else {
+          #if DEBUG == 1
+            Serial.printf("⚠️ Газ отброшен (некорректный): %.1f ppm\n", newGas);
+          #endif
+        }
+      }
+      else if (key == "M") {
+        int newSound = value.toInt();
+        if (newSound >= MIN_SOUND && newSound <= MAX_SOUND) {
+          sound = newSound;
+          hasValidData = true;
+          #if DEBUG == 1
+            Serial.printf("✅ Звук принят: %d\n", sound);
+          #endif
+        } else {
+          #if DEBUG == 1
+            Serial.printf("⚠️ Звук отброшен (некорректный): %d\n", newSound);
+          #endif
+        }
+      }
+      else if (key == "W") {
+        float newWeight = value.toFloat();
+        if (newWeight >= MIN_WEIGHT && newWeight <= MAX_WEIGHT) {
+          weight = newWeight;
+          hasValidData = true;
+          #if DEBUG == 1
+            Serial.printf("✅ Вес принят: %.2f\n", weight);
+          #endif
+        } else {
+          #if DEBUG == 1
+            Serial.printf("⚠️ Вес отброшен (некорректный): %.2f\n", newWeight);
+          #endif
+        }
+      }
+      else if (key == "L") {
+        alert = (value == "1");
+        hasValidData = true;
+        #if DEBUG == 1
+          Serial.printf("✅ Статус тревоги принят: %d\n", alert);
+        #endif
+      }
+    }
+    
+    start = end + 1;
+    end = workData.indexOf(',', start);
   }
   
-  // Газ (CO₂ в ppm)
-  int gasStart = data.indexOf(",G:");
-  int gasEnd = data.indexOf(",M:");
-  if (gasStart != -1 && gasEnd != -1) {
-    gas = data.substring(gasStart + 3, gasEnd).toFloat();
-  }
-  
-  // Звук
-  int soundStart = data.indexOf(",M:");
-  int soundEnd = data.indexOf(",W:");
-  if (soundStart != -1 && soundEnd != -1) {
-    sound = data.substring(soundStart + 3, soundEnd).toInt();
-  }
-  
-  // Вес
-  int weightStart = data.indexOf(",W:");
-  int weightEnd = data.indexOf(",A:");
-  if (weightStart != -1 && weightEnd != -1) {
-    weight = data.substring(weightStart + 3, weightEnd).toFloat();
-  }
-  
-  // Тревога
-  int alertStart = data.indexOf(",A:");
-  if (alertStart != -1) {
-    String alertStr = data.substring(alertStart + 3);
-    alertStr.trim();
-    alert = (alertStr == "1");
-  }
-  
-  // ФИЛЬТРАЦИЯ: обновляем только если данные корректны
-  if (isValidSensorData(temp, hum, gas, sound, weight)) {
+  // Обновляем глобальную структуру
+  if (hasValidData) {
     sensorData.temperature = temp;
     sensorData.humidity = hum;
     sensorData.gas = gas;
@@ -441,11 +496,14 @@ void parseSensorData(String data) {
     sensorData.alert = alert;
     sensorData.lastUpdate = String(millis() / 1000) + " сек. назад";
     
-    Serial.printf("✅ Данные: T=%.1f H=%.1f G=%.1f M=%d W=%.2f A=%d\n",
-                  temp, hum, gas, sound, weight, alert);
+    #if DEBUG == 1
+      Serial.printf("📊 Итоговые данные: T=%.1f H=%.1f G=%.1f M=%d W=%.2f A=%d\n",
+                    temp, hum, gas, sound, weight, alert);
+    #endif
   } else {
-    Serial.printf("❌ Отфильтровано: T=%.1f H=%.1f G=%.1f M=%d W=%.2f\n",
-                  temp, hum, gas, sound, weight);
+    #if DEBUG == 1
+      Serial.println("❌ Нет валидных данных для обновления");
+    #endif
   }
 }
 
@@ -483,7 +541,7 @@ void handleData() {
 }
 
 void handleDemoAlert() {
-  // Отправляем команду на Arduino через Serial
+  // Отправляем команду на Arduino через Serial (всегда отправляем, даже при DEBUG 0)
   Serial.println("DEMO_ALERT");
   
   StaticJsonDocument<128> response;
@@ -494,7 +552,9 @@ void handleDemoAlert() {
   serializeJson(response, resp);
   server.send(200, "application/json", resp);
   
-  Serial.println("📢 Демо-тревога отправлена на Arduino");
+  #if DEBUG == 1
+    Serial.println("📢 Демо-тревога отправлена на Arduino");
+  #endif
 }
 
 void handleNotFound() {
@@ -519,20 +579,26 @@ void setup() {
   Serial.begin(9600);
   delay(100);
   
-  Serial.println("\n\n=========================================");
-  Serial.println("   ESP8266 ВЕБ-СЕРВЕР для Умного улья");
-  Serial.println("   Порог тревоги: 2000 ppm CO₂");
-  Serial.println("   Обновление данных: каждые 3 секунды");
-  Serial.println("=========================================\n");
+  #if DEBUG == 1
+    Serial.println("\n\n=========================================");
+    Serial.println("   ESP8266 ВЕБ-СЕРВЕР для Умного улья");
+    Serial.println("   Порог тревоги: 2000 ppm CO₂");
+    Serial.println("   Обновление данных: каждые 3 секунды");
+    Serial.println("=========================================\n");
+  #endif
   
   // Создаем точку доступа
-  Serial.print("Создание точки доступа ");
-  Serial.print(ssid);
+  #if DEBUG == 1
+    Serial.print("Создание точки доступа ");
+    Serial.print(ssid);
+  #endif
   
   WiFi.softAP(ssid, password);
   
-  Serial.print(" - IP адрес: ");
-  Serial.println(WiFi.softAPIP());
+  #if DEBUG == 1
+    Serial.print(" - IP адрес: ");
+    Serial.println(WiFi.softAPIP());
+  #endif
   
   // Настройка веб-сервера
   server.on("/", handleRoot);
@@ -541,11 +607,14 @@ void setup() {
   server.onNotFound(handleNotFound);
   
   server.begin();
-  Serial.println("HTTP сервер запущен");
-  Serial.println("Подключитесь к Wi-Fi: SmartHive_AP (пароль: 12345678)");
-  Serial.print("Откройте браузер и перейдите по адресу: http://");
-  Serial.println(WiFi.softAPIP());
-  Serial.println("\n=========================================\n");
+  
+  #if DEBUG == 1
+    Serial.println("HTTP сервер запущен");
+    Serial.println("Подключитесь к Wi-Fi: SmartHive_AP (пароль: 12345678)");
+    Serial.print("Откройте браузер и перейдите по адресу: http://");
+    Serial.println(WiFi.softAPIP());
+    Serial.println("\n=========================================\n");
+  #endif
   
   // Инициализация данных
   sensorData.temperature = 0;
@@ -567,19 +636,25 @@ void loop() {
     data.trim();
     
     if (data.length() > 5) {
-      Serial.print("📨 Получено: ");
-      Serial.println(data);
+      #if DEBUG == 1
+        Serial.print("📨 Получено: ");
+        Serial.println(data);
+      #endif
       
       // Обработка демо-команд от Arduino
       if (data == "DEMO_START") {
         sensorData.alert = true;
         sensorData.gas = 2500;  // > 2000, тревога!
-        Serial.println("🎬 Демо: тревога установлена (CO₂ = 2500 ppm)");
+        #if DEBUG == 1
+          Serial.println("🎬 Демо: тревога установлена (CO₂ = 2500 ppm)");
+        #endif
       }
       else if (data == "DEMO_END") {
         sensorData.alert = false;
         sensorData.gas = 450;   // Норма
-        Serial.println("🏁 Демо: тревога снята (CO₂ = 450 ppm)");
+        #if DEBUG == 1
+          Serial.println("🏁 Демо: тревога снята (CO₂ = 450 ppm)");
+        #endif
       }
       else {
         // Обычные данные с датчиков

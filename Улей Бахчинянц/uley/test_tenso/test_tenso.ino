@@ -1,29 +1,52 @@
-#include "HX711.h"                 // Подключаем библиотеку HX711
-HX711 scale;                       // Создаём объект scale 
+#include "HX711.h"
 
-#define DT  4                      // Указываем номер вывода, к которому подключен вывод DT  датчика HX711
-#define SCK 5                      // Указываем номер вывода, к которому подключен вывод SCK датчика HX711
+#define HX711_DOUT 4
+#define HX711_SCK 5
 
-float calibration_factor = 3.9;  // Вводим калибровочный коэффициент
-float units;                       // Задаём переменную для измерений в граммах
-float ounces;                      // Задаём переменную для измерений в унциях
+HX711 scale;
 
-void setup()
-{
-  Serial.begin(57600);             // Инициируем работу последовательного порта на скорости 9600 бод
-  scale.begin(DT, SCK);            // Инициируем работу с датчиком
-  scale.set_scale();               // Выполняем измерение значения без калибровочного коэффициента
-  scale.tare();                    // Сбрасываем значения веса на датчике в 0
-  scale.set_scale(calibration_factor); // Устанавливаем калибровочный коэффициент
+void setup() {
+  Serial.begin(9600);
+  Serial.println(F("=== КАЛИБРОВКА С ВЕСОМ 672 ГРАММА ==="));
+  
+  scale.begin(HX711_DOUT, HX711_SCK);
+  
+  Serial.println(F("ШАГ 1: Уберите весь вес с датчика"));
+  delay(3000);
+  scale.tare();
+  Serial.println(F("Обнуление выполнено"));
+  
+  Serial.println(F("\nШАГ 2: Положите груз 672 грамма"));
+  Serial.println(F("(подождите 5 секунд)"));
+  delay(5000);
+  
+  float reading = scale.get_units(10);
+  Serial.print(F("Сырое значение датчика: "));
+  Serial.println(reading);
+  
+  float newFactor = reading / 672.0;
+  Serial.println(F("\n=== РЕЗУЛЬТАТ ==="));
+  Serial.print(F("Ваш калибровочный коэффициент: "));
+  Serial.println(newFactor, 4);
+  
+  scale.set_scale(newFactor);
+  Serial.print(F("Проверка: вес = "));
+  Serial.print(scale.get_units(5), 2);
+  Serial.println(F(" грамм"));
+  
+  Serial.println(F("\nСкопируйте этот коэффициент в основной код:"));
+  Serial.print(F("const float CALIBRATION_FACTOR = "));
+  Serial.print(newFactor, 4);
+  Serial.println(F(";"));
 }
 
 void loop() {
-  Serial.print("Reading: ");         // Выводим текст в монитор последовательного порта
-  for (int i = 0; i < 10; i ++) {    // Усредняем показания, считав значения датчика 10 раз
-    units = + scale.get_units(), 10; // Суммируем показания 10 замеров
+  // Постоянное отображение веса после калибровки
+  if (scale.is_ready()) {
+    float weight = scale.get_units(5);
+    Serial.print(F("Вес: "));
+    Serial.print(weight, 2);
+    Serial.println(F(" грамм"));
   }
-  units = units / 10;                // Усредняем показания, разделив сумму значений на 10
-  ounces = (units * 0.035274)*10;    // Переводим вес из унций в граммы
-  Serial.print(ounces);              // Выводим в монитор последовательного порта вес в граммах
-  Serial.println(" grams");          // Выводим текст в монитор последовательного порта
+  delay(500);
 }
