@@ -3,6 +3,7 @@
 #define GAS_THRESHOLD_PPM 2000    // Порог срабатывания датчика газа (ppm CO2)
 #define SERVO_DELAY 5000          // Время вращения сервы при тревоге (мс)
 #define DEBUG 0
+#define SMOOTHING_WINDOW 10       // Размер окна скользящего среднего
 
 // Для сервопривода ПОСТОЯННОГО ВРАЩЕНИЯ:
 // 90 = СТОП
@@ -38,12 +39,67 @@ Servo servo;
 
 MQ135 gasSensor = MQ135(GAS_PIN);
 
+// ========== КЛАСС ДЛЯ СКОЛЬЗЯЩЕГО СРЕДНЕГО ==========
+class MovingAverage {
+private:
+  float buffer[SMOOTHING_WINDOW];
+  int index;
+  int count;
+  float sum;
+  
+public:
+  MovingAverage() {
+    index = 0;
+    count = 0;
+    sum = 0;
+    for (int i = 0; i < SMOOTHING_WINDOW; i++) {
+      buffer[i] = 0;
+    }
+  }
+  
+  float addValue(float value) {
+    if (count < SMOOTHING_WINDOW) {
+      // Заполняем буфер
+      buffer[count] = value;
+      sum += value;
+      count++;
+      return sum / count;
+    } else {
+      // Замещаем старые значения
+      sum -= buffer[index];
+      buffer[index] = value;
+      sum += value;
+      index = (index + 1) % SMOOTHING_WINDOW;
+      return sum / SMOOTHING_WINDOW;
+    }
+  }
+  
+  void reset() {
+    index = 0;
+    count = 0;
+    sum = 0;
+  }
+};
+
 // ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+MovingAverage tempAvg;
+MovingAverage humAvg;
+MovingAverage gasAvg;
+MovingAverage micAvg;
+MovingAverage weightAvg;
+
+float rawTemperature = 0;
+float rawHumidity = 0;
+float rawGasPPM = 0;
+int rawMicValue = 0;
+float rawWeight = 0;
+
 float temperature = 0;
 float humidity = 0;
 float gasPPM = 0;
 int micValue = 0;
 float weight = 0;
+
 bool gasAlert = false;
 unsigned long lastServoMove = 0;
 bool servoCommandSent = false;
@@ -81,6 +137,7 @@ void setup() {
   Serial.println("System initialized");
   Serial.println("Порог тревоги: 2000 ppm CO2");
   Serial.println("Сервопривод постоянного вращения");
+  Serial.println("Скользящее среднее: 10 значений");
   Serial.println("========================================");
   #endif
 }
@@ -94,6 +151,7 @@ void loop() {
     lastUpdate = millis();
     
     readSensors();
+    applySmoothing();         // Применяем скользящее среднее
     processGasAlert();
     sendDataToESP();
   }
@@ -137,13 +195,14 @@ void loop() {
         demoMode = true;
         demoStartTime = millis();
         savedGasPPM = gasPPM;
-        gasPPM = 2500;
+        rawGasPPM = 2500;         // Сырое значение для демо
+        applySmoothing();          // Применяем сглаживание
         processGasAlert();
         
         Serial.println("DEMO_START");
         #if DEBUG == 1
         Serial.println("🎬 Демо: CO2 = 2500 ppm");
-        #endif#endif
+        #endif
       }
     }
   }
@@ -151,38 +210,63 @@ void loop() {
 
 // ========== ЧТЕНИЕ ДАННЫХ С ДАТЧИКОВ ==========
 void readSensors() {
-  temperature = dht.readTemperature();
-  humidity = dht.readHumidity();
+  rawTemperature = dht.readTemperature();
+  rawHumidity = dht.readHumidity();
   
   if (!demoMode) {
-    if (!isnan(temperature) && !isnan(humidity) && temperature > -50 && humidity >= 0 && humidity <= 100) {
-      gasPPM = gasSensor.getCorrectedPPM(temperature, humidity);
+    if (!isnan(rawTemperature) && !isnan(rawHumidity) && rawTemperature > -50 && rawHumidity >= 0 && rawHumidity <= 100) {
+      rawGasPPM = gasSensor.getCorrectedPPM(rawTemperature, rawHumidity);
     } else {
-      gasPPM = gasSensor.getPPM();
+      rawGasPPM = gasSensor.getPPM();
     }
   }
   
-  micValue = analogRead(MIC_PIN);
+  rawMicValue = analogRead(MIC_PIN);
   
   if (scale.is_ready()) {
-    weight = scale.get_units(5);
+    rawWeight = scale.get_units(5);
   }
   
-  if (isnan(temperature) || isnan(humidity)) {
-    temperature = -99;
-    humidity = -99;
+  if (isnan(rawTemperature) || isnan(rawHumidity)) {
+    rawTemperature = -99;
+    rawHumidity = -99;
   }
   
-  if (gasPPM < 300 || gasPPM > 5000) {
+  if (rawGasPPM < 300 || rawGasPPM > 5000) {
     static unsigned long lastWarning = 0;
     if (millis() - lastWarning > 10000) {
        #if DEBUG == 1
       Serial.print("⚠️ Предупреждение: нереалистичное значение CO2: ");
-      Serial.println(gasPPM);
+      Serial.println(rawGasPPM);
       #endif
       lastWarning = millis();
     }
   }
+}
+
+// ========== ПРИМЕНЕНИЕ СКОЛЬЗЯЩЕГО СРЕДНЕГО ==========
+void applySmoothing() {
+  // Применяем фильтр только для корректных значений
+  if (rawTemperature != -99 && rawTemperature > -50 && rawTemperature < 100) {
+    temperature = tempAvg.addValue(rawTemperature);
+  } else {
+    temperature = -99;
+  }
+  
+  if (rawHumidity != -99 && rawHumidity >= 0 && rawHumidity <= 100) {
+    humidity = humAvg.addValue(rawHumidity);
+  } else {
+    humidity = -99;
+  }
+  
+  if (rawGasPPM >= 300 && rawGasPPM <= 5000) {
+    gasPPM = gasAvg.addValue(rawGasPPM);
+  } else {
+    gasPPM = gasAvg.addValue(400); // Подставляем нормальное значение для фильтра
+  }
+  
+  micValue = (int)micAvg.addValue((float)rawMicValue);
+  weight = weightAvg.addValue(rawWeight);
 }
 
 // ========== ОБРАБОТКА ПРЕВЫШЕНИЯ ГАЗА ==========
