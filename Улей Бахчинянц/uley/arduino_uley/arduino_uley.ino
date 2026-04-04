@@ -1,13 +1,20 @@
 // ========== НАСТРОЙКИ ПРОЕКТА ==========
 #define TIME_INTERVAL 1000        // Интервал опроса датчиков (мс)
-#define GAS_THRESHOLD 300         // Порог срабатывания датчика газа
-#define SERVO_ANGLE 90            // Угол поворота сервы при тревоге
-#define SERVO_DELAY 5000          // Время удержания сервы в положении (мс)
+#define GAS_THRESHOLD_PPM 2000    // Порог срабатывания датчика газа (ppm CO2)
+#define SERVO_DELAY 5000          // Время вращения сервы при тревоге (мс)
+#define DEBUG 0
+
+// Для сервопривода ПОСТОЯННОГО ВРАЩЕНИЯ:
+// 90 = СТОП
+// 0 = полный ход в одну сторону
+// 180 = полный ход в другую сторону
+#define SERVO_STOP 90
+#define SERVO_FORWARD 0           // Направление для тревоги (можно поменять на 180)
 
 // ========== ОПРЕДЕЛЕНИЕ ПИНОВ ==========
 // Датчики
 #define DHT_PIN 2                // DHT11
-#define GAS_PIN A0               // MQ датчик газа
+#define GAS_PIN A0               // MQ135 датчик газа (аналоговый выход)
 #define MIC_PIN A1               // MAX9814
 #define BUZZER_PIN 3             // Пьезопищалка (опционально)
 
@@ -22,120 +29,207 @@
 #include <DHT.h>
 #include <HX711.h>
 #include <Servo.h>
+#include "MQ135.h"
 
 // ========== ОБЪЯВЛЕНИЕ ОБЪЕКТОВ ==========
 DHT dht(DHT_PIN, DHT11);
 HX711 scale;
 Servo servo;
 
+MQ135 gasSensor = MQ135(GAS_PIN);
+
 // ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
 float temperature = 0;
 float humidity = 0;
-int gasValue = 0;
+float gasPPM = 0;
 int micValue = 0;
 float weight = 0;
 bool gasAlert = false;
 unsigned long lastServoMove = 0;
+bool servoCommandSent = false;
+
+// Для демо-режима
+bool demoMode = false;
+unsigned long demoStartTime = 0;
+float savedGasPPM = 0;
 
 // Калибровка тензодатчика
-const float CALIBRATION_FACTOR = -96650.0; // Подобрать индивидуально
+const float CALIBRATION_FACTOR = -96650.0;
 
+// ========== SETUP ==========
 void setup() {
   Serial.begin(9600);
   
-  // Инициализация датчиков
   dht.begin();
   scale.begin(HX711_DOUT, HX711_SCK);
-  servo.attach(SERVO_PIN);
   
-  // Настройка пинов
   pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(GAS_PIN, INPUT);
   pinMode(MIC_PIN, INPUT);
   
-  // Калибровка тензодатчика
-  scale.set_scale(CALIBRATION_FACTOR);
-  scale.tare(); // Сброс на ноль
+  // scale.set_scale(CALIBRATION_FACTOR);
+  // scale.tare();
   
-  // Исходное положение сервы
-  servo.write(0);
+  // ИНИЦИАЛИЗАЦИЯ СЕРВО ПОСТОЯННОГО ВРАЩЕНИЯ
+  servo.attach(SERVO_PIN);
+  delay(100);
+  servo.write(SERVO_STOP);    // СТОП
+  delay(500);
   
   delay(2000);
+  #if DEBUG == 1
+  Serial.println("========================================");
   Serial.println("System initialized");
+  Serial.println("Порог тревоги: 2000 ppm CO2");
+  Serial.println("Сервопривод постоянного вращения");
+  Serial.println("========================================");
+  #endif
 }
 
+// ========== LOOP ==========
 void loop() {
   static unsigned long lastUpdate = 0;
   
-  // Опрос датчиков с заданным интервалом
+  // Опрос датчиков (раз в секунду)
   if (millis() - lastUpdate >= TIME_INTERVAL) {
     lastUpdate = millis();
     
     readSensors();
     processGasAlert();
     sendDataToESP();
+  }
+  
+  // Остановка вращения через заданное время
+  if (gasAlert && (millis() - lastServoMove >= SERVO_DELAY)) {
+    servo.write(SERVO_STOP);    // СТОП
+    delay(15);
+    gasAlert = false;
+    servoCommandSent = false;
+    #if DEBUG == 1
+    Serial.println("🔄 Серво остановлен (таймаут)");
+    #endif
+  }
+  
+  // Демо-режим
+  if (demoMode && (millis() - demoStartTime >= 3000)) {
+    demoMode = false;
+    gasPPM = savedGasPPM;
     
-    // Автовозврат сервы через заданное время
-    if (gasAlert && (millis() - lastServoMove >= SERVO_DELAY)) {
-      servo.write(0);
+    if (gasAlert) {
+      servo.write(SERVO_STOP);
+      delay(15);
       gasAlert = false;
+      servoCommandSent = false;
+    }
+    
+    Serial.println("DEMO_END");
+    #if DEBUG == 1
+    Serial.println("🏁 Демо-режим завершён");
+    #endif
+  }
+  
+  // Команды от ESP8266
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd == "DEMO_ALERT") {
+      if (!demoMode && !gasAlert) {
+        demoMode = true;
+        demoStartTime = millis();
+        savedGasPPM = gasPPM;
+        gasPPM = 2500;
+        processGasAlert();
+        
+        Serial.println("DEMO_START");
+        #if DEBUG == 1
+        Serial.println("🎬 Демо: CO2 = 2500 ppm");
+        #endif#endif
+      }
     }
   }
 }
 
 // ========== ЧТЕНИЕ ДАННЫХ С ДАТЧИКОВ ==========
 void readSensors() {
-  // DHT11
   temperature = dht.readTemperature();
   humidity = dht.readHumidity();
   
-  // Датчик газа MQ
-  gasValue = analogRead(GAS_PIN);
-  
-  // Микрофон MAX9814
-  micValue = analogRead(MIC_PIN);
-  
-  // Тензодатчик
-  if (scale.is_ready()) {
-    weight = scale.get_units(5); // Усреднение 5 измерений
+  if (!demoMode) {
+    if (!isnan(temperature) && !isnan(humidity) && temperature > -50 && humidity >= 0 && humidity <= 100) {
+      gasPPM = gasSensor.getCorrectedPPM(temperature, humidity);
+    } else {
+      gasPPM = gasSensor.getPPM();
+    }
   }
   
-  // Проверка ошибок DHT
+  micValue = analogRead(MIC_PIN);
+  
+  if (scale.is_ready()) {
+    weight = scale.get_units(5);
+  }
+  
   if (isnan(temperature) || isnan(humidity)) {
     temperature = -99;
     humidity = -99;
+  }
+  
+  if (gasPPM < 300 || gasPPM > 5000) {
+    static unsigned long lastWarning = 0;
+    if (millis() - lastWarning > 10000) {
+       #if DEBUG == 1
+      Serial.print("⚠️ Предупреждение: нереалистичное значение CO2: ");
+      Serial.println(gasPPM);
+      #endif
+      lastWarning = millis();
+    }
   }
 }
 
 // ========== ОБРАБОТКА ПРЕВЫШЕНИЯ ГАЗА ==========
 void processGasAlert() {
-  if (gasValue > GAS_THRESHOLD && !gasAlert) {
+  if (gasPPM > GAS_THRESHOLD_PPM && !gasAlert && !servoCommandSent) {
     gasAlert = true;
-    servo.write(SERVO_ANGLE);
+    servoCommandSent = true;
+    
+    // ЗАПУСКАЕМ ВРАЩЕНИЕ (полный ход)
+    servo.write(SERVO_FORWARD);
+    delay(15);
     lastServoMove = millis();
     
     // Сигнал тревоги
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(200);
-    digitalWrite(BUZZER_PIN, LOW);
-    
-    Serial.print("GAS ALERT! Value: ");
-    Serial.println(gasValue);
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(BUZZER_PIN, HIGH);
+      delay(100);
+      digitalWrite(BUZZER_PIN, LOW);
+      delay(100);
+    }
+     #if DEBUG == 1
+    Serial.print("🚨 GAS ALERT! CO2: ");
+    Serial.print(gasPPM);
+    Serial.println(" ppm (превышен порог 2000 ppm)");
+    Serial.println("🔧 Серво начал вращение");
+    #endif
   }
 }
 
 // ========== ПЕРЕДАЧА ДАННЫХ НА ESP ==========
 void sendDataToESP() {
-  // Формат: T:25.5,H:60,G:245,M:512,W:12.34,A:0
-  
   Serial.print("T:");
-  Serial.print(temperature, 1);
+  if (temperature == -99) {
+    Serial.print("0.0");
+  } else {
+    Serial.print(temperature, 1);
+  }
   
   Serial.print(",H:");
-  Serial.print(humidity, 1);
+  if (humidity == -99) {
+    Serial.print("0.0");
+  } else {
+    Serial.print(humidity, 1);
+  }
   
   Serial.print(",G:");
-  Serial.print(gasValue);
+  Serial.print(gasPPM, 1);
   
   Serial.print(",M:");
   Serial.print(micValue);
@@ -146,25 +240,29 @@ void sendDataToESP() {
   Serial.print(",A:");
   Serial.print(gasAlert ? "1" : "0");
   
-  Serial.println(); // Конец строки
+  Serial.println();
 }
 
 // ========== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ==========
 void calibrateScale() {
-  // Функция для калибровки тензодатчика
+   #if DEBUG == 1
   Serial.println("Calibrating scale...");
   Serial.println("Remove all weight from scale");
+  #endif
   delay(3000);
   
   scale.tare();
+   #if DEBUG == 1
   Serial.println("Tare done");
   
   Serial.println("Place known weight on scale");
+  #endif
   delay(5000);
   
   float reading = scale.get_units(10);
-  float factor = reading / 1000.0; // Для веса 1000г
-  
+  float factor = reading / 1000.0;
+   #if DEBUG == 1
   Serial.print("Calibration factor: ");
   Serial.println(factor);
+  #endif
 }
