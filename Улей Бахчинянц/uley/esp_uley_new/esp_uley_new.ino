@@ -1,0 +1,590 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ArduinoJson.h>
+
+// ========== НАСТРОЙКИ ТОЧКИ ДОСТУПА ==========
+const char* ssid = "SmartHive_AP";
+const char* password = "12345678";
+
+// ========== НАСТРОЙКИ ФИЛЬТРАЦИИ ==========
+#define MIN_TEMP -10.0
+#define MAX_TEMP 60.0
+#define MIN_HUM 0.0
+#define MAX_HUM 100.0
+#define MIN_GAS 300.0      // Минимальное адекватное значение CO2 (ppm)
+#define MAX_GAS 5000.0     // Максимальное адекватное значение CO2 (ppm)
+#define MIN_SOUND 0
+#define MAX_SOUND 1023
+#define MIN_WEIGHT -5.0
+#define MAX_WEIGHT 500000.0
+
+// ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+ESP8266WebServer server(80);
+
+// Данные с датчиков
+struct SensorData {
+  float temperature = 0;
+  float humidity = 0;
+  float gas = 400;        // ppm, начальное значение
+  int sound = 0;
+  float weight = 0;
+  bool alert = false;
+  String lastUpdate = "Нет данных";
+} sensorData;
+
+// ========== HTML СТРАНИЦА (с порогом 2000 ppm и обновлением 3 сек) ==========
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Умный улей - Мониторинг</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+      margin: 0;
+      padding: 20px;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .header {
+      text-align: center;
+      background: #2c3e50;
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      margin-bottom: 30px;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    .card {
+      background: white;
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      transition: transform 0.3s;
+    }
+    .card:hover {
+      transform: translateY(-5px);
+    }
+    .card h3 {
+      margin-top: 0;
+      color: #2c3e50;
+      border-bottom: 2px solid #3498db;
+      padding-bottom: 10px;
+    }
+    .value {
+      font-size: 2.5em;
+      font-weight: bold;
+      text-align: center;
+      margin: 20px 0;
+    }
+    .unit {
+      color: #7f8c8d;
+      font-size: 0.8em;
+    }
+    .alert {
+      background: #ff6b6b !important;
+      color: white;
+      animation: pulse 2s infinite;
+    }
+    .normal {
+      background: #1dd1a1 !important;
+      color: white;
+    }
+    .warning {
+      background: #ff9f43 !important;
+      color: white;
+    }
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.8; }
+      100% { opacity: 1; }
+    }
+    .status-bar {
+      background: white;
+      border-radius: 10px;
+      padding: 15px;
+      margin-bottom: 20px;
+      text-align: center;
+      font-size: 1.2em;
+    }
+    .controls {
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      margin-top: 20px;
+      flex-wrap: wrap;
+    }
+    button {
+      background: #3498db;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 1em;
+      transition: background 0.3s;
+    }
+    button:hover {
+      background: #2980b9;
+    }
+    .demo-btn {
+      background: #e67e22;
+    }
+    .demo-btn:hover {
+      background: #d35400;
+    }
+    .chart-container {
+      background: white;
+      border-radius: 10px;
+      padding: 20px;
+      margin-top: 30px;
+    }
+    pre {
+      background: #2c3e50;
+      color: #ecf0f1;
+      padding: 15px;
+      border-radius: 10px;
+      overflow: auto;
+      font-size: 0.9em;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🐝 Умный улей - Мониторинг</h1>
+      <p>IP адрес: %IPADDRESS%</p>
+      <p>Последнее обновление: <span id="lastUpdate">%LASTUPDATE%</span></p>
+    </div>
+    
+    <div class="status-bar" id="statusBar">
+      <span id="statusText">Статус: Норма</span>
+    </div>
+    
+    <div class="cards">
+      <div class="card" id="tempCard">
+        <h3>🌡️ Температура</h3>
+        <div class="value"><span id="tempValue">%TEMPERATURE%</span> <span class="unit">°C</span></div>
+      </div>
+      
+      <div class="card" id="humCard">
+        <h3>💧 Влажность</h3>
+        <div class="value"><span id="humValue">%HUMIDITY%</span> <span class="unit">%</span></div>
+      </div>
+      
+      <div class="card" id="gasCard">
+        <h3>⚠️ Уровень CO₂</h3>
+        <div class="value"><span id="gasValue">%GAS%</span> <span class="unit">ppm</span></div>
+        <div style="font-size: 0.8em; text-align: center;">⚠️ Порог тревоги: <strong>2000 ppm</strong></div>
+      </div>
+      
+      <div class="card" id="soundCard">
+        <h3>🎤 Уровень звука</h3>
+        <div class="value"><span id="soundValue">%SOUND%</span> <span class="unit">ед.</span></div>
+      </div>
+      
+      <div class="card" id="weightCard">
+        <h3>⚖️ Вес улья</h3>
+        <div class="value"><span id="weightValue">%WEIGHT%</span> <span class="unit">кг</span></div>
+      </div>
+      
+      <div class="card" id="alertCard">
+        <h3>🚨 Тревога</h3>
+        <div class="value" id="alertValue">%ALERT%</div>
+      </div>
+    </div>
+    
+    <div class="controls">
+      <button onclick="refreshData()">🔄 Обновить данные</button>
+      <button onclick="sendDemoAlert()" class="demo-btn">⚠️ ДЕМО: Превышение CO₂</button>
+      <button onclick="location.reload()">📱 Полное обновление</button>
+    </div>
+    
+    <div class="chart-container" id="chartContainer" style="display:none;">
+      <h3>📈 История показаний (последние 10 замеров)</h3>
+      <canvas id="dataChart" width="400" height="200"></canvas>
+    </div>
+    
+    <div style="background: white; border-radius: 10px; padding: 20px; margin-top: 30px;">
+      <h3>📋 Последние данные в JSON</h3>
+      <pre id="jsonData">Загрузка...</pre>
+    </div>
+  </div>
+  
+  <script>
+    let dataHistory = {
+      temperature: [],
+      humidity: [],
+      gas: [],
+      sound: [],
+      weight: []
+    };
+    
+    function updateCards(data) {
+      document.getElementById('tempValue').textContent = data.temperature.toFixed(1);
+      document.getElementById('humValue').textContent = data.humidity.toFixed(1);
+      document.getElementById('gasValue').textContent = Math.round(data.gas);
+      document.getElementById('soundValue').textContent = data.sound;
+      document.getElementById('weightValue').textContent = data.weight.toFixed(2);
+      document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+      
+      const alertCard = document.getElementById('alertCard');
+      const alertValue = document.getElementById('alertValue');
+      const statusBar = document.getElementById('statusBar');
+      const statusText = document.getElementById('statusText');
+      
+      if (data.alert) {
+        alertCard.className = 'card alert';
+        alertValue.innerHTML = '🚨 АКТИВНА<br><small>CO₂ > 2000 ppm!</small>';
+        statusBar.className = 'status-bar alert';
+        statusText.textContent = '🚨 СТАТУС: ТРЕВОГА! Превышение CO₂ > 2000 ppm';
+      } else if (data.gas > 1500) {
+        alertCard.className = 'card warning';
+        alertValue.innerHTML = '⚠️ ВНИМАНИЕ<br><small>CO₂ повышен</small>';
+        statusBar.className = 'status-bar warning';
+        statusText.textContent = '⚠️ СТАТУС: Внимание. Уровень CO₂ повышен';
+      } else {
+        alertCard.className = 'card normal';
+        alertValue.innerHTML = '✅ НОРМА<br><small>CO₂ в норме</small>';
+        statusBar.className = 'status-bar normal';
+        statusText.textContent = '✅ СТАТУС: Норма. Все показания в порядке';
+      }
+      
+      // Оценка температуры
+      if (data.temperature > 35) {
+        document.getElementById('tempCard').className = 'card warning';
+      } else {
+        document.getElementById('tempCard').className = 'card';
+      }
+      
+      // Оценка влажности
+      if (data.humidity > 80) {
+        document.getElementById('humCard').className = 'card warning';
+      } else {
+        document.getElementById('humCard').className = 'card';
+      }
+      
+      // Оценка газа (CO₂) с порогом 2000 ppm
+      if (data.gas > 2000) {
+        document.getElementById('gasCard').className = 'card alert';
+      } else if (data.gas > 1500) {
+        document.getElementById('gasCard').className = 'card warning';
+      } else {
+        document.getElementById('gasCard').className = 'card';
+      }
+        
+      addToHistory(data);
+      document.getElementById('jsonData').textContent = JSON.stringify(data, null, 2);
+    }
+    
+    function addToHistory(data) {
+      const maxItems = 10;
+      dataHistory.temperature.push(data.temperature);
+      dataHistory.humidity.push(data.humidity);
+      dataHistory.gas.push(data.gas);
+      dataHistory.sound.push(data.sound);
+      dataHistory.weight.push(data.weight);
+      
+      Object.keys(dataHistory).forEach(key => {
+        if (dataHistory[key].length > maxItems) {
+          dataHistory[key].shift();
+        }
+      });
+    }
+    
+    function refreshData() {
+      fetch('/data')
+        .then(response => response.json())
+        .then(data => {
+          updateCards(data);
+        })
+        .catch(error => {
+          console.error('Error fetching data:', error);
+        });
+    }
+    
+    function sendDemoAlert() {
+      fetch('/demo/alert', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+          console.log('Демо-тревога:', data);
+          refreshData();
+        })
+        .catch(error => console.error('Error:', error));
+    }
+    
+    function toggleChart() {
+      const chartContainer = document.getElementById('chartContainer');
+      if (chartContainer.style.display === 'none') {
+        chartContainer.style.display = 'block';
+        drawChart();
+      } else {
+        chartContainer.style.display = 'none';
+      }
+    }
+    
+    function drawChart() {
+      const ctx = document.getElementById('dataChart').getContext('2d');
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: Array.from({length: dataHistory.temperature.length}, (_, i) => i + 1),
+          datasets: [
+            { label: 'Температура', data: dataHistory.temperature, borderColor: '#ff6b6b', yAxisID: 'y' },
+            { label: 'Влажность', data: dataHistory.humidity, borderColor: '#3498db', yAxisID: 'y' },
+            { label: 'CO₂', data: dataHistory.gas, borderColor: '#ff9f43', yAxisID: 'y1' }
+          ]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            y: { title: { display: true, text: 'Температура/Влажность' } },
+            y1: { position: 'right', title: { display: true, text: 'CO₂ (ppm)' }, grid: { drawOnChartArea: false } }
+          }
+        }
+      });
+    }
+    
+    // ОБНОВЛЕНИЕ КАЖДЫЕ 3 СЕКУНДЫ
+    setInterval(refreshData, 3000);
+    
+    window.onload = function() { 
+      refreshData(); 
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</body>
+</html>
+)rawliteral";
+
+// ========== ФУНКЦИЯ ФИЛЬТРАЦИИ ==========
+bool isValidSensorData(float temp, float hum, float gas, int sound, float weight) {
+  if (temp < MIN_TEMP || temp > MAX_TEMP) return false;
+  if (hum < MIN_HUM || hum > MAX_HUM) return false;
+  if (gas < MIN_GAS || gas > MAX_GAS) return false;
+  if (sound < MIN_SOUND || sound > MAX_SOUND) return false;
+  if (weight < MIN_WEIGHT || weight > MAX_WEIGHT) return false;
+  return true;
+}
+
+// ========== ПАРСИНГ ДАННЫХ С ARDUINO ==========
+void parseSensorData(String data) {
+  // Формат: T:25.5,H:60,G:245,M:512,W:12.34,A:0
+  
+  float temp = -99;
+  float hum = -99;
+  float gas = -99;
+  int sound = -1;
+  float weight = -99;
+  bool alert = false;
+  
+  // Температура
+  int tempStart = data.indexOf("T:");
+  int tempEnd = data.indexOf(",H:");
+  if (tempStart != -1 && tempEnd != -1) {
+    temp = data.substring(tempStart + 2, tempEnd).toFloat();
+  }
+  
+  // Влажность
+  int humStart = data.indexOf(",H:");
+  int humEnd = data.indexOf(",G:");
+  if (humStart != -1 && humEnd != -1) {
+    hum = data.substring(humStart + 3, humEnd).toFloat();
+  }
+  
+  // Газ (CO₂ в ppm)
+  int gasStart = data.indexOf(",G:");
+  int gasEnd = data.indexOf(",M:");
+  if (gasStart != -1 && gasEnd != -1) {
+    gas = data.substring(gasStart + 3, gasEnd).toFloat();
+  }
+  
+  // Звук
+  int soundStart = data.indexOf(",M:");
+  int soundEnd = data.indexOf(",W:");
+  if (soundStart != -1 && soundEnd != -1) {
+    sound = data.substring(soundStart + 3, soundEnd).toInt();
+  }
+  
+  // Вес
+  int weightStart = data.indexOf(",W:");
+  int weightEnd = data.indexOf(",A:");
+  if (weightStart != -1 && weightEnd != -1) {
+    weight = data.substring(weightStart + 3, weightEnd).toFloat();
+  }
+  
+  // Тревога
+  int alertStart = data.indexOf(",A:");
+  if (alertStart != -1) {
+    String alertStr = data.substring(alertStart + 3);
+    alertStr.trim();
+    alert = (alertStr == "1");
+  }
+  
+  // ФИЛЬТРАЦИЯ: обновляем только если данные корректны
+  if (isValidSensorData(temp, hum, gas, sound, weight)) {
+    sensorData.temperature = temp;
+    sensorData.humidity = hum;
+    sensorData.gas = gas;
+    sensorData.sound = sound;
+    sensorData.weight = weight;
+    sensorData.alert = alert;
+    sensorData.lastUpdate = String(millis() / 1000) + " сек. назад";
+    
+    Serial.printf("✅ Данные: T=%.1f H=%.1f G=%.1f M=%d W=%.2f A=%d\n",
+                  temp, hum, gas, sound, weight, alert);
+  } else {
+    Serial.printf("❌ Отфильтровано: T=%.1f H=%.1f G=%.1f M=%d W=%.2f\n",
+                  temp, hum, gas, sound, weight);
+  }
+}
+
+// ========== ОБРАБОТЧИКИ ВЕБ-СЕРВЕРА ==========
+void handleRoot() {
+  String html = String(index_html);
+  
+  html.replace("%TEMPERATURE%", String(sensorData.temperature, 1));
+  html.replace("%HUMIDITY%", String(sensorData.humidity, 1));
+  html.replace("%GAS%", String((int)sensorData.gas));
+  html.replace("%SOUND%", String(sensorData.sound));
+  html.replace("%WEIGHT%", String(sensorData.weight, 2));
+  html.replace("%ALERT%", sensorData.alert ? "АКТИВНА" : "НЕТ");
+  html.replace("%LASTUPDATE%", sensorData.lastUpdate);
+  html.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+  
+  server.send(200, "text/html", html);
+}
+
+void handleData() {
+  StaticJsonDocument<256> doc;
+  
+  doc["temperature"] = sensorData.temperature;
+  doc["humidity"] = sensorData.humidity;
+  doc["gas"] = sensorData.gas;
+  doc["sound"] = sensorData.sound;
+  doc["weight"] = sensorData.weight;
+  doc["alert"] = sensorData.alert;
+  doc["lastUpdate"] = sensorData.lastUpdate;
+  doc["threshold"] = 2000;  // Передаём порог на клиент
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleDemoAlert() {
+  // Отправляем команду на Arduino через Serial
+  Serial.println("DEMO_ALERT");
+  
+  StaticJsonDocument<128> response;
+  response["status"] = "ok";
+  response["message"] = "Демо-тревога активирована (CO₂ > 2000 ppm)";
+  
+  String resp;
+  serializeJson(response, resp);
+  server.send(200, "application/json", resp);
+  
+  Serial.println("📢 Демо-тревога отправлена на Arduino");
+}
+
+void handleNotFound() {
+  String message = "File Not Found\n\n";
+  message += "URI: ";
+  message += server.uri();
+  message += "\nMethod: ";
+  message += (server.method() == HTTP_GET) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += server.args();
+  message += "\n";
+  
+  for (uint8_t i = 0; i < server.args(); i++) {
+    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
+  }
+  
+  server.send(404, "text/plain", message);
+}
+
+// ========== SETUP ==========
+void setup() {
+  Serial.begin(9600);
+  delay(100);
+  
+  Serial.println("\n\n=========================================");
+  Serial.println("   ESP8266 ВЕБ-СЕРВЕР для Умного улья");
+  Serial.println("   Порог тревоги: 2000 ppm CO₂");
+  Serial.println("   Обновление данных: каждые 3 секунды");
+  Serial.println("=========================================\n");
+  
+  // Создаем точку доступа
+  Serial.print("Создание точки доступа ");
+  Serial.print(ssid);
+  
+  WiFi.softAP(ssid, password);
+  
+  Serial.print(" - IP адрес: ");
+  Serial.println(WiFi.softAPIP());
+  
+  // Настройка веб-сервера
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/demo/alert", HTTP_POST, handleDemoAlert);
+  server.onNotFound(handleNotFound);
+  
+  server.begin();
+  Serial.println("HTTP сервер запущен");
+  Serial.println("Подключитесь к Wi-Fi: SmartHive_AP (пароль: 12345678)");
+  Serial.print("Откройте браузер и перейдите по адресу: http://");
+  Serial.println(WiFi.softAPIP());
+  Serial.println("\n=========================================\n");
+  
+  // Инициализация данных
+  sensorData.temperature = 0;
+  sensorData.humidity = 0;
+  sensorData.gas = 400;
+  sensorData.sound = 0;
+  sensorData.weight = 0;
+  sensorData.alert = false;
+  sensorData.lastUpdate = "Ожидание данных...";
+}
+
+// ========== LOOP ==========
+void loop() {
+  server.handleClient();
+  
+  // Чтение данных с Arduino через Serial
+  if (Serial.available()) {
+    String data = Serial.readStringUntil('\n');
+    data.trim();
+    
+    if (data.length() > 5) {
+      Serial.print("📨 Получено: ");
+      Serial.println(data);
+      
+      // Обработка демо-команд от Arduino
+      if (data == "DEMO_START") {
+        sensorData.alert = true;
+        sensorData.gas = 2500;  // > 2000, тревога!
+        Serial.println("🎬 Демо: тревога установлена (CO₂ = 2500 ppm)");
+      }
+      else if (data == "DEMO_END") {
+        sensorData.alert = false;
+        sensorData.gas = 450;   // Норма
+        Serial.println("🏁 Демо: тревога снята (CO₂ = 450 ppm)");
+      }
+      else {
+        // Обычные данные с датчиков
+        parseSensorData(data);
+      }
+    }
+  }
+}
