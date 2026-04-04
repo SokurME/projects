@@ -1,7 +1,7 @@
 // ========== НАСТРОЙКИ ПРОЕКТА ==========
 #define TIME_INTERVAL 1000        // Интервал опроса датчиков (мс)
 #define GAS_THRESHOLD_PPM 2000    // Порог срабатывания датчика газа (ppm CO2)
-#define SERVO_DURATION 3000       // Время вращения сервы (мс) - время открытия/закрытия
+#define SERVO_DURATION 700       // Время вращения сервы (мс) - время открытия/закрытия
 #define DEBUG 0                   // 1 - включить отладку, 0 - выключить
 #define SMOOTHING_WINDOW 10       // Размер окна скользящего среднего
 
@@ -18,6 +18,9 @@
 #define HX711_DOUT 4
 #define HX711_SCK 5
 #define SERVO_PIN 9
+
+// ========== КАЛИБРОВКА ТЕНЗОДАТЧИКА ==========
+const float CALIBRATION_FACTOR = 45.0;  // Калибровочный коэффициент (вес в граммах)
 
 // ========== БИБЛИОТЕКИ ==========
 #include <DHT.h>
@@ -89,14 +92,14 @@ int16_t rawTemperature = 0;
 int16_t rawHumidity = 0;
 int16_t rawGasPPM = 0;
 int16_t rawMicValue = 0;
-int16_t rawWeight = 0;
+int32_t rawWeight = 0;  // Изменено на int32_t для хранения веса в граммах
 
 // Усреднённые данные
 int16_t temperature = 0;
 int16_t humidity = 0;
 int16_t gasPPM = 0;
 int16_t micValue = 0;
-int16_t weight = 0;
+int32_t weight = 0;  // Вес в граммах (целое число)
 
 // Состояния системы
 bool lidOpen = false;           // Крышка открыта (газ превышен)
@@ -109,9 +112,6 @@ unsigned long demoStartTime = 0;
 int16_t savedGasPPM = 0;
 int16_t savedRawGasPPM = 0;
 bool savedLidOpen = false;
-
-// Калибровка тензодатчика
-const float CALIBRATION_FACTOR = 556;
 
 // ========== ПРОТОТИПЫ ФУНКЦИЙ ==========
 void readSensors();
@@ -379,10 +379,11 @@ void readSensors() {
   
   rawMicValue = analogRead(MIC_PIN);
   
+  // Чтение веса (в граммах)
   if (scale.is_ready()) {
-    float w = scale.get_units(10);
+    float w = scale.get_units(5);  // Вес в граммах
     if (w < 0 && w > -5) w = 0;
-    rawWeight = (int16_t)(w * 100.0);
+    rawWeight = (int32_t)(w);  // Сохраняем вес в граммах (целое число)
   } else {
     rawWeight = weight;
   }
@@ -407,7 +408,8 @@ void readSensors() {
     Serial.print(F(" | Hum: ")); Serial.print(rawHumidity / 10.0);
     Serial.print(F(" | Gas: ")); Serial.print(rawGasPPM);
     Serial.print(F(" | Lid: ")); Serial.print(lidOpen ? "OPEN" : "CLOSED");
-    Serial.print(F(" | Weight: ")); Serial.println(rawWeight / 100.0);
+    Serial.print(F(" | Weight: ")); Serial.print(rawWeight / 1000.0, 3);
+    Serial.println(F(" kg"));
     lastDebugPrint = millis();
   }
   #endif
@@ -432,7 +434,7 @@ void applySmoothing() {
   }
   
   micValue = micAvg.addValue(rawMicValue);
-  weight = weightAvg.addValue(rawWeight);
+  weight = weightAvg.addValue(rawWeight);  // Вес в граммах
   
   #if DEBUG == 1
   static unsigned long lastDebugPrintAvg = 0;
@@ -441,6 +443,7 @@ void applySmoothing() {
     Serial.print(F("Temp: ")); Serial.print(temperature / 10.0, 1);
     Serial.print(F(" | Hum: ")); Serial.print(humidity / 10.0, 1);
     Serial.print(F(" | Gas: ")); Serial.print(gasPPM);
+    Serial.print(F(" | Weight: ")); Serial.print(weight / 1000.0, 3);
     Serial.print(F(" | Lid: ")); Serial.println(lidOpen ? "OPEN" : "CLOSED");
     lastDebugPrintAvg = millis();
   }
@@ -470,7 +473,8 @@ void sendDataToESP() {
   Serial.print(micValue);
   
   Serial.print(F(",W:"));
-  Serial.print(weight / 100.0, 2);
+  // Отправляем вес в КИЛОГРАММАХ с 3 знаками после запятой
+  Serial.print(weight / 1000.0, 3);
   
   Serial.print(F(",L:"));
   Serial.print(lidOpen ? "1" : "0");
@@ -487,11 +491,11 @@ void calibrateScale() {
   scale.tare();
   Serial.println(F("Тара сброшена"));
   
-  Serial.println(F("2. Положите груз 672 грамма"));
+  Serial.println(F("2. Положите груз 450 грамм"));
   delay(5000);
   
   float reading = scale.get_units(10);
-  float knownWeight = 672.0;
+  float knownWeight = 450.0;  // Вес эталона в граммах
   
   if (reading != 0) {
     float newFactor = reading / knownWeight;

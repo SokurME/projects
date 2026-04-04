@@ -4,10 +4,13 @@
 #define HX711_SCK 5
 
 HX711 scale;
+const float KNOWN_WEIGHT = 450.0;  // Ваш эталонный вес в граммах
 
 void setup() {
   Serial.begin(9600);
-  Serial.println(F("=== КАЛИБРОВКА С ВЕСОМ 672 ГРАММА ==="));
+  Serial.print(F("=== КАЛИБРОВКА С ВЕСОМ "));
+  Serial.print(KNOWN_WEIGHT);
+  Serial.println(F(" ГРАММ ==="));
   
   scale.begin(HX711_DOUT, HX711_SCK);
   
@@ -16,7 +19,9 @@ void setup() {
   scale.tare();
   Serial.println(F("Обнуление выполнено"));
   
-  Serial.println(F("\nШАГ 2: Положите груз 672 грамма"));
+  Serial.print(F("\nШАГ 2: Положите груз "));
+  Serial.print(KNOWN_WEIGHT);
+  Serial.println(F(" грамма"));
   Serial.println(F("(подождите 5 секунд)"));
   delay(5000);
   
@@ -24,7 +29,7 @@ void setup() {
   Serial.print(F("Сырое значение датчика: "));
   Serial.println(reading);
   
-  float newFactor = reading / 672.0;
+  float newFactor = reading / KNOWN_WEIGHT;  // Правильная формула
   Serial.println(F("\n=== РЕЗУЛЬТАТ ==="));
   Serial.print(F("Ваш калибровочный коэффициент: "));
   Serial.println(newFactor, 4);
